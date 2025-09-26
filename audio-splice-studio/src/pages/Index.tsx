@@ -4,7 +4,7 @@ import { ProcessingState } from '@/components/ProcessingState';
 import { AudioPlayer } from '@/components/AudioPlayer';
 import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Mic, Music2, Sparkles, AlertCircle } from 'lucide-react';
+import { Mic, Music2, Sparkles, AlertCircle, Instagram } from 'lucide-react';
 import { splitAudio, getAudioUrl, SplitResult } from '@/services/api';
 
 const Index = () => {
@@ -44,7 +44,15 @@ const Index = () => {
             </div>
             
             <div className="flex items-center gap-4">
-              {/* Social media icons removed */}
+              <a 
+                href="https://www.instagram.com/saimimran__?igsh=MXJyMnB4dzl5bmJtbw=="
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-muted-foreground hover:text-primary transition-colors"
+                aria-label="Instagram"
+              >
+                <Instagram className="h-5 w-5" />
+              </a>
             </div>
           </div>
         </div>
