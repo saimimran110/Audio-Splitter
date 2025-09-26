@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 // Backend API configuration
-const API_BASE_URL = 'http://127.0.0.1:8000';
+const API_BASE_URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://127.0.0.1:8000';
 
 // Create axios instance with default config
 const apiClient = axios.create({
