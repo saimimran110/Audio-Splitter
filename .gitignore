@@ -1,0 +1,5 @@
+backend/demucs_output/
+backend/*.mp3
+backend/*.wav
+backend/*.m4a
+backend/*.flac
