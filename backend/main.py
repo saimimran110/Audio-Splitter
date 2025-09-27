@@ -12,14 +12,14 @@ from fastapi.staticfiles import StaticFiles
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for Vercel deployment
+    allow_origins=["http://localhost:5173", "http://localhost:8080", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# For Vercel serverless, use /tmp directory
-BASE_DIR = "/tmp"
+# Use local directory structure
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_FOLDER = os.path.join(BASE_DIR, "demucs_output")
 MODEL = "htdemucs"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
