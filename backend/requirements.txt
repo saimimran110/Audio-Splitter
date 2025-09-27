@@ -1,4 +1,7 @@
 fastapi
-uvicorn
-demucs
+uvicorn[standard]
+python-multipart
 aiofiles
+demucs
+torch
+torchaudio
