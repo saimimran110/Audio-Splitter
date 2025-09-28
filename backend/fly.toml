@@ -1,61 +1,30 @@
-# fly.toml app configuration file# fly.toml app configuration file generated for audio-splitter-backend
+app = "audio-splitter-backend"
+primary_region = "ord"
 
-app = "audio-splitter-backend"#
+[build]
+  dockerfile = "Dockerfile"
 
-primary_region = "ord"# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-
-#
+[env]
+  PORT = "8000"
 
 [http_service]
-
-  internal_port = 8000app = "audio-splitter-backend"
-
-  force_https = trueprimary_region = "ord"
-
+  internal_port = 8000
+  force_https = true
   auto_stop_machines = true
-
-  auto_start_machines = true[build]
-
-  min_machines_running = 0  dockerfile = "Dockerfile"
-
-
-
-[[http_service.checks]][env]
-
-  interval = "15s"  PORT = "8080"
-
-  grace_period = "5s"
-
-  method = "GET"[http_service]
-
-  path = "/"  internal_port = 8080
-
-  protocol = "http"  force_https = true
-
-  timeout = "4s"  auto_stop_machines = true
-
   auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
 
-[processes]  min_machines_running = 0
-
-  app = "uvicorn main:app --host 0.0.0.0 --port 8000"  processes = ["app"]
-
-
-
-[[vm]][[http_service.checks]]
-
-  cpu_kind = "shared"  interval = "15s"
-
-  cpus = 1  grace_period = "5s"
-
-  memory_mb = 1024  method = "GET"
-  path = "/"
-  protocol = "http"
-  timeout = "4s"
-  tls_skip_verify = false
+  [[http_service.checks]]
+    interval = "15s"
+    grace_period = "5s"
+    method = "GET"
+    path = "/"
+    protocol = "http"
+    timeout = "4s"
 
 [processes]
-  app = "uvicorn main:app --host 0.0.0.0 --port 8080"
+  app = "uvicorn main:app --host 0.0.0.0 --port 8000"
 
 [[vm]]
   cpu_kind = "shared"
