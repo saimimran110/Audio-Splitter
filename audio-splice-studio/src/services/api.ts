@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 // Backend API configuration
-const API_BASE_URL = 'https://audio-splitter-3x2f.onrender.com';
+const API_BASE_URL = 'http://127.0.0.1:8000';
 
 // Create axios instance with default config
 const apiClient = axios.create({
