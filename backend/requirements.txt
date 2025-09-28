@@ -1,5 +1,5 @@
-fastapi
-uvicorn[standard]
-python-multipart
-aiofiles
-demucs
+fastapi==0.115.0
+uvicorn==0.30.6
+python-multipart==0.0.9
+aiofiles==23.2.1
+demucs==4.0.1
