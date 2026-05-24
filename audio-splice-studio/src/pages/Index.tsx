@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { AudioUpload } from '@/components/AudioUpload';
 import { ProcessingState } from '@/components/ProcessingState';
 import { AudioPlayer } from '@/components/AudioPlayer';
+import { AdSenseSlot } from '@/components/AdSenseSlot';
 import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Mic, Music2, Sparkles, AlertCircle, Instagram } from 'lucide-react';
@@ -172,6 +173,8 @@ const Index = () => {
               </CardContent>
             </Card>
           </div>
+
+          <AdSenseSlot />
         </div>
       </main>
 

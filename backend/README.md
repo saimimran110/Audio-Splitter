@@ -1,88 +1,82 @@
-# MusicSpliter Backend Documentation
+# MusicSpliter Backend
 
-## Overview
-This backend is built with FastAPI and provides an API to split an uploaded MP3 file into vocals and karaoke using Demucs. It also serves the output files for download and supports CORS for frontend integration.
+FastAPI service that runs Demucs to split an uploaded song into vocals and karaoke. In production the app is served from the repository root Dockerfile, which builds the React frontend and serves it from the same container as the API.
 
----
+## What changed for production
 
-## Features
-- **/split**: Accepts an MP3 file upload, runs Demucs, and returns URLs for vocals and karaoke.
-- **Static File Serving**: Serves output files at `/files/...` for direct download.
-- **CORS Enabled**: Allows requests from frontend (http://localhost:5173).
+- Uploads are validated and stored with generated names instead of trusting the browser filename.
+- Demucs runs off the async request thread so the API does not block the event loop.
+- The API exposes `/health` for deployment checks.
+- If the frontend build exists at `audio-splice-studio/dist`, the backend serves it from `/`.
+- File downloads are served from `/files/...`.
+- AdSense support is wired through `audio-splice-studio/index.html` and the `AdSenseSlot` component.
 
----
+## Local development
 
-## Requirements
-- Python 3.10+
-- FastAPI
-- Uvicorn
-- Demucs (installed and available in PATH)
+Run the backend from the `backend` folder:
 
-Install dependencies:
 ```bash
-pip install fastapi uvicorn
+cd backend
+uvicorn main:app --reload
 ```
 
----
+Run the frontend from the `audio-splice-studio` folder in a second terminal:
 
-## How to Run
-1. **Start the backend server:**
-   ```bash
-   uvicorn backend.main:app --reload
-   ```
-   - Run this command from the project root (`MusicSpliter`), not inside the `backend` folder.
-   - The API will be available at: http://127.0.0.1:8000
-   - Interactive docs: http://127.0.0.1:8000/docs
+```bash
+cd audio-splice-studio
+npm install
+npm run dev
+```
 
-2. **Demucs must be installed and available in your system PATH.**
-   - [Demucs Installation Guide](https://github.com/facebookresearch/demucs#installation)
+For local frontend development, Vite proxies API requests to `http://127.0.0.1:8000`.
 
----
+## Environment variables
 
-## API Endpoints
-### POST `/split`
-- **Description:** Upload an MP3 file to split into vocals and karaoke.
-- **Request:**
-  - Form-data: `file` (MP3 file)
-- **Response:**
-  ```json
-  {
-    "vocals": "/files/htdemucs/<song_name>/vocals.wav",
-    "karaoke": "/files/htdemucs/<song_name>/no_vocals.wav"
-  }
-  ```
-- **Example using curl:**
-  ```bash
-  curl -F "file=@your_song.mp3" http://127.0.0.1:8000/split
-  ```
+- `DEMUCS_MODEL` - optional Demucs model name, defaults to `htdemucs`
+- `CORS_ORIGINS` - optional comma-separated allowlist for development origins
+- `ADSENSE_CLIENT_ID` - optional Google AdSense client id used at runtime
+- `ADSENSE_SLOT_ID` - optional Google AdSense slot id used at runtime
 
-### GET `/files/...`
-- **Description:** Download output files (vocals/karaoke) using the URLs returned by `/split`.
+## Hugging Face Spaces deployment
 
----
+Use the repository root `Dockerfile`.
 
-## Frontend Requirements
-- Any frontend (React, Vite, etc.) can call the `/split` endpoint using a POST request with a file upload.
-- To download files, use the URLs returned by the API, prefixing with `http://127.0.0.1:8000`.
-- Example download URL:
-  - `http://127.0.0.1:8000/files/htdemucs/<song_name>/vocals.wav`
+1. Push the repo to GitHub.
+2. Create a new Hugging Face Space.
+3. Choose `Docker` as the Space type.
+4. Connect the GitHub repo or import the repo directly.
+5. Add `ADSENSE_CLIENT_ID` and `ADSENSE_SLOT_ID` in the Space variables or secrets settings if you want AdSense enabled.
+6. Wait for the image build to finish.
+7. Open the Space URL and verify `/health` returns `{"status":"ok"}`.
 
----
+The container listens on port `7860`, which is the default Hugging Face Spaces Docker port.
 
-## Example Frontend Flow
-1. User uploads an MP3 file.
-2. Frontend sends POST request to `/split`.
-3. Backend processes and returns download URLs.
-4. Frontend displays download buttons for vocals and karaoke.
+## API
 
----
+### `POST /split`
+Form-data field:
+
+- `file` - audio file upload
+
+Response:
+
+```json
+{
+  "vocals": "/files/htdemucs/<job_id>/vocals.wav",
+  "karaoke": "/files/htdemucs/<job_id>/no_vocals.wav"
+}
+```
+
+### `GET /files/...`
+Serves generated audio files.
+
+### `GET /health`
+Simple health check for deployment platforms.
+
+### `POST /cleanup`
+Deletes generated Demucs output files.
 
 ## Notes
-- Make sure Demucs is installed and working.
-- Backend must be running for frontend to work.
-- CORS is enabled for `http://localhost:5173` (default Vite dev server).
 
----
-
-## Contact
-For any issues, contact the developer or check the Demucs documentation for troubleshooting.
+- The repo root Dockerfile installs `ffmpeg` and `libsndfile1`, which Demucs needs for audio processing.
+- If you change the frontend ad settings, rebuild the Space so the Vite HTML template is regenerated.
