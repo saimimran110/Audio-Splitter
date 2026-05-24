@@ -1,78 +1,133 @@
 
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse
-import subprocess
+import atexit
+import asyncio
 import os
 import shutil
-import atexit
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 
 app = FastAPI()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+OUTPUT_FOLDER = PROJECT_ROOT / "demucs_output"
+FRONTEND_DIST = PROJECT_ROOT / "audio-splice-studio" / "dist"
+MODEL = os.getenv("DEMUCS_MODEL", "htdemucs")
+ADSENSE_CLIENT_ID = os.getenv("ADSENSE_CLIENT_ID", "").strip()
+ADSENSE_SLOT_ID = os.getenv("ADSENSE_SLOT_ID", "").strip()
+
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:5173,http://localhost:8080,http://localhost:3000",
+    ).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for now
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Use local directory structure
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUTPUT_FOLDER = os.path.join(BASE_DIR, "demucs_output")
-MODEL = "htdemucs"
-os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
 
-# Cleanup function to delete all generated files
+
 def cleanup_files():
     try:
-        if os.path.exists(OUTPUT_FOLDER):
+        if OUTPUT_FOLDER.exists():
             shutil.rmtree(OUTPUT_FOLDER)
+            OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
             print("Cleaned up all generated audio files")
-        
-        # Also delete any uploaded files in BASE_DIR
-        for file in os.listdir(BASE_DIR):
-            if file.endswith(('.mp3', '.wav', '.m4a', '.flac')):
-                os.remove(os.path.join(BASE_DIR, file))
-                print(f"Deleted uploaded file: {file}")
     except Exception as e:
         print(f"Error during cleanup: {e}")
 
-# Register cleanup function to run when server shuts down
+
 atexit.register(cleanup_files)
 
-# Serve demucs_output as static files
-app.mount("/files", StaticFiles(directory=OUTPUT_FOLDER), name="files")
+app.mount("/files", StaticFiles(directory=str(OUTPUT_FOLDER)), name="files")
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/config")
+async def app_config():
+    return {
+        "adsenseClientId": ADSENSE_CLIENT_ID,
+        "adsenseSlotId": ADSENSE_SLOT_ID,
+    }
+
+
+def run_demucs(input_path: Path) -> subprocess.CompletedProcess:
+    command = [
+        sys.executable,
+        "-m",
+        "demucs.separate",
+        str(input_path),
+        "-o",
+        str(OUTPUT_FOLDER),
+        "-n",
+        MODEL,
+        "--two-stems=vocals",
+    ]
+    return subprocess.run(command, check=True, capture_output=True, text=True)
 
 
 @app.post("/split")
 async def split_song(file: UploadFile = File(...)):
-    # Save uploaded file
-    input_path = os.path.join(BASE_DIR, file.filename)
-    with open(input_path, "wb") as f:
-        f.write(await file.read())
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="File name is required")
 
-    # Run demucs
+    original_name = Path(file.filename).name
+    suffix = Path(original_name).suffix.lower()
+    if suffix not in {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".webm", ".wma"}:
+        raise HTTPException(status_code=400, detail="Unsupported audio format")
+
+    job_id = uuid.uuid4().hex
+    input_path = PROJECT_ROOT / f"{job_id}{suffix}"
+    input_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with input_path.open("wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
     try:
-        subprocess.run([
-            "demucs",
-            input_path,
-            "-o", OUTPUT_FOLDER,
-            "-n", MODEL,
-            "--two-stems=vocals"
-        ], check=True)
+        await asyncio.to_thread(run_demucs, input_path)
     except subprocess.CalledProcessError as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        error_output = (e.stderr or e.stdout or str(e)).strip()
+        raise HTTPException(status_code=500, detail=f"Demucs failed: {error_output}") from e
+    finally:
+        if input_path.exists():
+            input_path.unlink()
 
-    song_name = os.path.splitext(os.path.basename(input_path))[0]
-    vocals_url = f"/files/{MODEL}/{song_name}/vocals.wav"
-    karaoke_url = f"/files/{MODEL}/{song_name}/no_vocals.wav"
+    output_dir = OUTPUT_FOLDER / MODEL / job_id
+    vocals_file = output_dir / "vocals.wav"
+    karaoke_file = output_dir / "no_vocals.wav"
 
-    return {"vocals": vocals_url, "karaoke": karaoke_url}
+    if not vocals_file.exists() or not karaoke_file.exists():
+        raise HTTPException(status_code=500, detail="Expected Demucs output files were not created")
 
-# Add a manual cleanup endpoint if needed
+    return {
+        "vocals": f"/files/{MODEL}/{job_id}/vocals.wav",
+        "karaoke": f"/files/{MODEL}/{job_id}/no_vocals.wav",
+    }
+
+
 @app.post("/cleanup")
 async def manual_cleanup():
     cleanup_files()
     return {"message": "Cleanup completed"}
+
+
+if FRONTEND_DIST.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")

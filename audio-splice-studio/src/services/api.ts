@@ -1,15 +1,8 @@
 import axios from 'axios';
 
-// Backend API configuration
-const API_BASE_URL = 'https://audio-splitter-backend.fly.dev';
-
 // Create axios instance with default config
 const apiClient = axios.create({
-  baseURL: API_BASE_URL,
   timeout: 300000, // 5 minutes timeout for audio processing
-  headers: {
-    'Content-Type': 'multipart/form-data',
-  },
 });
 
 export interface SplitResult {
@@ -32,11 +25,7 @@ export const splitAudio = async (file: File): Promise<SplitResult> => {
     const formData = new FormData();
     formData.append('file', file);
 
-    const response = await apiClient.post('/split', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    });
+    const response = await apiClient.post('/split', formData);
 
     return response.data;
   } catch (error) {
@@ -56,7 +45,7 @@ export const splitAudio = async (file: File): Promise<SplitResult> => {
  * @returns Full URL for the audio file
  */
 export const getAudioUrl = (relativePath: string): string => {
-  return `${API_BASE_URL}${relativePath}`;
+  return relativePath;
 };
 
 /**
@@ -65,7 +54,7 @@ export const getAudioUrl = (relativePath: string): string => {
  */
 export const checkBackendHealth = async (): Promise<boolean> => {
   try {
-    await apiClient.get('/docs'); // FastAPI docs endpoint
+    await apiClient.get('/health');
     return true;
   } catch {
     return false;

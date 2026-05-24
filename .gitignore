@@ -3,3 +3,14 @@ backend/*.mp3
 backend/*.wav
 backend/*.m4a
 backend/*.flac
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.aac
+*.ogg
+*.wma
+demucs_output/
+audio-splice-studio/dist/
+backend/__pycache__/
+__pycache__/
