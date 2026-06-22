@@ -12,6 +12,11 @@ WORKDIR /app
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PORT=7860
+ENV OMP_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV OPENBLAS_NUM_THREADS=1
+ENV NUMEXPR_NUM_THREADS=1
+ENV VECLIB_MAXIMUM_THREADS=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \

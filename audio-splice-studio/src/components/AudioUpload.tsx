@@ -31,6 +31,10 @@ export const AudioUpload = ({ onFileUpload, isProcessing }: AudioUploadProps) =>
     if (files.length > 0) {
       const file = files[0];
       if (file.type.startsWith('audio/')) {
+        if (file.size > 20 * 1024 * 1024) {
+          alert('File is too large. Maximum size is 20MB.');
+          return;
+        }
         onFileUpload(file);
       }
     }
@@ -39,7 +43,12 @@ export const AudioUpload = ({ onFileUpload, isProcessing }: AudioUploadProps) =>
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (files && files.length > 0) {
-      onFileUpload(files[0]);
+      const file = files[0];
+      if (file.size > 20 * 1024 * 1024) {
+        alert('File is too large. Maximum size is 20MB.');
+        return;
+      }
+      onFileUpload(file);
     }
   };
 
@@ -84,7 +93,7 @@ export const AudioUpload = ({ onFileUpload, isProcessing }: AudioUploadProps) =>
             </div>
             <div className="flex items-center gap-2">
               <Upload className="h-4 w-4" />
-              <span>Max 50MB</span>
+              <span>Max 20MB</span>
             </div>
           </div>
 
