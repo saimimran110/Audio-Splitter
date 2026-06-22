@@ -18,6 +18,8 @@ ENV OPENBLAS_NUM_THREADS=1
 ENV NUMEXPR_NUM_THREADS=1
 ENV VECLIB_MAXIMUM_THREADS=1
 
+ENV TORCH_HOME=/app/.cache
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
@@ -28,6 +30,10 @@ RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 
 COPY backend/ /app/backend/
 COPY --from=frontend-builder /app/audio-splice-studio/dist /app/audio-splice-studio/dist
+
+# Pre-download and cache the Demucs model during Docker build
+RUN python -m demucs.separate -n htdemucs --two-stems=vocals /app/backend/test_tone.wav -o /tmp/dummy_out && rm -rf /tmp/dummy_out
+RUN chmod -R 777 /app/.cache
 
 WORKDIR /app/backend
 
