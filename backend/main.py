@@ -1,7 +1,13 @@
 
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+
 import atexit
 import asyncio
-import os
 import shutil
 import subprocess
 import sys
@@ -80,6 +86,8 @@ def run_demucs(input_path: Path) -> subprocess.CompletedProcess:
         "-n",
         MODEL,
         "--two-stems=vocals",
+        "-j",
+        "1",
     ]
     return subprocess.run(command, check=True, capture_output=True, text=True)
 
@@ -98,8 +106,16 @@ async def split_song(file: UploadFile = File(...)):
     input_path = PROJECT_ROOT / f"{job_id}{suffix}"
     input_path.parent.mkdir(parents=True, exist_ok=True)
 
+    max_size = 20 * 1024 * 1024  # 20MB limit
+    size = 0
     with input_path.open("wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+        for chunk in iter(lambda: file.file.read(1024 * 1024), b""):
+            size += len(chunk)
+            if size > max_size:
+                buffer.close()
+                input_path.unlink()
+                raise HTTPException(status_code=413, detail="File is too large. Maximum size is 20MB.")
+            buffer.write(chunk)
 
     try:
         await asyncio.to_thread(run_demucs, input_path)
