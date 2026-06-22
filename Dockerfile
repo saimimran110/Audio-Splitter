@@ -32,7 +32,7 @@ COPY backend/ /app/backend/
 COPY --from=frontend-builder /app/audio-splice-studio/dist /app/audio-splice-studio/dist
 
 # Pre-download and cache the Demucs model during Docker build
-RUN python -m demucs.separate -n htdemucs --two-stems=vocals /app/backend/test_tone.wav -o /tmp/dummy_out && rm -rf /tmp/dummy_out
+RUN python -m demucs.separate -n htdemucs --two-stems=vocals /app/backend/test-tone.wav -o /tmp/dummy_out && rm -rf /tmp/dummy_out
 RUN chmod -R 777 /app/.cache
 
 WORKDIR /app/backend
