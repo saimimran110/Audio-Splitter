@@ -50,29 +50,13 @@ export const AudioPlayer = ({ title, audioUrl, downloadUrl, icon, variant }: Aud
     setIsPlaying(!isPlaying);
   };
 
-  const handleDownload = async () => {
-    try {
-      const response = await fetch(downloadUrl);
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${title.toLowerCase().replace(' ', '_')}.wav`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(url);
-    } catch (error) {
-      console.error('Download failed:', error);
-      // Fallback to direct link
-      const link = document.createElement('a');
-      link.href = downloadUrl;
-      link.download = `${title.toLowerCase().replace(' ', '_')}.wav`;
-      link.target = '_blank';
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    }
+  const handleDownload = () => {
+    const link = document.createElement('a');
+    link.href = downloadUrl;
+    link.download = `${title.toLowerCase().replace(/\s+/g, '_')}.mp3`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
@@ -152,7 +136,7 @@ export const AudioPlayer = ({ title, audioUrl, downloadUrl, icon, variant }: Aud
         </div>
       </CardContent>
 
-      <audio ref={audioRef} src={audioUrl} preload="metadata" />
+      <audio ref={audioRef} src={audioUrl} preload="auto" />
     </Card>
   );
 };
