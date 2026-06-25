@@ -1,11 +1,18 @@
 
 import os
-# Set thread limits BEFORE importing torch/demucs
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+# Set thread limits depending on environment BEFORE importing torch/demucs
+if os.path.exists("/app"):
+    # Hugging Face Free CPU has exactly 2 vCPUs.
+    # Setting to 2 threads utilizes both cores for maximum production speed.
+    os.environ["OMP_NUM_THREADS"] = "2"
+    os.environ["MKL_NUM_THREADS"] = "2"
+    os.environ["OPENBLAS_NUM_THREADS"] = "2"
+    os.environ["NUMEXPR_NUM_THREADS"] = "2"
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "2"
+else:
+    # Local Windows: Let PyTorch use all available CPU cores/threads for max speed
+    pass
+
 os.environ["TORCH_HOME"] = "/app/.cache/torch"
 os.environ["HF_HOME"] = "/app/.cache/hub"
 import atexit
