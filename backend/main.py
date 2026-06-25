@@ -39,7 +39,7 @@ FRONTEND_DIST = PROJECT_ROOT / "audio-splice-studio" / "dist"
 # Default model detection with local fallback
 default_model = "mdx_extra"
 try:
-    
+    import diffq
     default_model = "mdx_extra_q"
 except ImportError:
     pass
