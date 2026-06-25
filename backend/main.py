@@ -76,6 +76,21 @@ async def app_config():
     }
 
 
+def convert_wav_to_mp3(wav_path: Path, mp3_path: Path, bitrate: str = "192k") -> None:
+    """Convert a WAV file to MP3 using ffmpeg (already installed in container)."""
+    command = [
+        "ffmpeg",
+        "-y",                    # overwrite output without asking
+        "-i", str(wav_path),
+        "-codec:a", "libmp3lame",
+        "-b:a", bitrate,
+        "-ac", "2",              # stereo
+        str(mp3_path),
+    ]
+    subprocess.run(command, check=True, capture_output=True)
+    wav_path.unlink()            # delete large WAV after conversion
+
+
 def run_demucs(input_path: Path) -> subprocess.CompletedProcess:
     command = [
         sys.executable,
@@ -91,6 +106,18 @@ def run_demucs(input_path: Path) -> subprocess.CompletedProcess:
         "1",
     ]
     return subprocess.run(command, check=True, capture_output=True, text=True)
+
+
+def run_demucs_and_convert(input_path: Path, job_id: str) -> None:
+    """Run Demucs then convert output WAVs to MP3."""
+    run_demucs(input_path)
+
+    output_dir = OUTPUT_FOLDER / MODEL / job_id
+    for stem in ("vocals", "no_vocals"):
+        wav_file = output_dir / f"{stem}.wav"
+        mp3_file = output_dir / f"{stem}.mp3"
+        if wav_file.exists():
+            convert_wav_to_mp3(wav_file, mp3_file)
 
 
 @app.post("/split")
@@ -119,24 +146,24 @@ async def split_song(file: UploadFile = File(...)):
             buffer.write(chunk)
 
     try:
-        await asyncio.to_thread(run_demucs, input_path)
+        await asyncio.to_thread(run_demucs_and_convert, input_path, job_id)
     except subprocess.CalledProcessError as e:
         error_output = (e.stderr or e.stdout or str(e)).strip()
-        raise HTTPException(status_code=500, detail=f"Demucs failed: {error_output}") from e
+        raise HTTPException(status_code=500, detail=f"Processing failed: {error_output}") from e
     finally:
         if input_path.exists():
             input_path.unlink()
 
     output_dir = OUTPUT_FOLDER / MODEL / job_id
-    vocals_file = output_dir / "vocals.wav"
-    karaoke_file = output_dir / "no_vocals.wav"
+    vocals_file = output_dir / "vocals.mp3"
+    karaoke_file = output_dir / "no_vocals.mp3"
 
     if not vocals_file.exists() or not karaoke_file.exists():
-        raise HTTPException(status_code=500, detail="Expected Demucs output files were not created")
+        raise HTTPException(status_code=500, detail="Expected output MP3 files were not created")
 
     return {
-        "vocals": f"/files/{MODEL}/{job_id}/vocals.wav",
-        "karaoke": f"/files/{MODEL}/{job_id}/no_vocals.wav",
+        "vocals": f"/files/{MODEL}/{job_id}/vocals.mp3",
+        "karaoke": f"/files/{MODEL}/{job_id}/no_vocals.mp3",
     }
 
 
