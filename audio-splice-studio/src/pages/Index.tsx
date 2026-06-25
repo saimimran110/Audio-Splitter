@@ -13,19 +13,22 @@ const Index = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [result, setResult] = useState<SplitResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string>('');
 
   const handleFileUpload = async (file: File) => {
     setSelectedFile(file);
     setIsProcessing(true);
     setError(null);
+    setStatusMessage('Uploading file...');
     
     try {
-      const splitResult = await splitAudio(file);
+      const splitResult = await splitAudio(file, setStatusMessage);
       setResult(splitResult);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to process audio file');
     } finally {
       setIsProcessing(false);
+      setStatusMessage('');
     }
   };
 
@@ -91,7 +94,7 @@ const Index = () => {
             </Alert>
           )}
 
-          {isProcessing && <ProcessingState />}
+          {isProcessing && <ProcessingState message={statusMessage} />}
 
           {/* Results */}
           {result && !isProcessing && (
