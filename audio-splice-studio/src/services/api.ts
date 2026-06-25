@@ -1,8 +1,7 @@
 import axios from 'axios';
 
-// Create axios instance with default config
 const apiClient = axios.create({
-  timeout: 300000, // 5 minutes timeout for audio processing
+  timeout: 30000, // 30s per individual request (upload + each poll)
 });
 
 export interface SplitResult {
@@ -10,48 +9,79 @@ export interface SplitResult {
   karaoke: string;
 }
 
-export interface ApiError {
-  message: string;
-  status: number;
+export interface JobStatus {
+  jobId: string;
+  status: 'queued' | 'processing' | 'completed' | 'failed';
+  message?: string;
+  vocals?: string;
+  karaoke?: string;
 }
 
 /**
- * Upload audio file to backend for splitting
- * @param file - Audio file to be processed
- * @returns Promise with URLs for vocals and karaoke tracks
+ * Upload audio file, then poll until the job finishes.
+ * This avoids the Hugging Face 60-second reverse-proxy timeout
+ * because we never hold a single HTTP connection open for the full
+ * duration of the Demucs run.
  */
-export const splitAudio = async (file: File): Promise<SplitResult> => {
+export const splitAudio = async (
+  file: File,
+  onProgress?: (message: string) => void,
+): Promise<SplitResult> => {
+  // 1. Upload and get a job ID immediately
+  const formData = new FormData();
+  formData.append('file', file);
+
+  let jobId: string;
   try {
-    const formData = new FormData();
-    formData.append('file', file);
-
-    const response = await apiClient.post('/split', formData);
-
-    return response.data;
-  } catch (error) {
-    if (axios.isAxiosError(error)) {
-      throw new Error(
-        error.response?.data?.error || 
-        `API Error: ${error.response?.status || 'Network Error'}`
-      );
+    const res = await apiClient.post<{ jobId: string }>('/split', formData);
+    jobId = res.data.jobId;
+    onProgress?.('Job started — AI separation in progress...');
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      throw new Error(err.response?.data?.detail || `Upload failed: ${err.message}`);
     }
-    throw new Error('An unexpected error occurred');
+    throw new Error('Upload failed: unexpected error');
   }
+
+  // 2. Poll /jobs/{jobId} every 4 seconds until done or failed
+  const POLL_INTERVAL_MS = 4000;
+  const MAX_WAIT_MS = 15 * 60 * 1000; // 15 minutes absolute ceiling
+  const started = Date.now();
+
+  while (Date.now() - started < MAX_WAIT_MS) {
+    await sleep(POLL_INTERVAL_MS);
+
+    let job: JobStatus;
+    try {
+      const res = await apiClient.get<JobStatus>(`/jobs/${jobId}`);
+      job = res.data;
+    } catch (err) {
+      // Network blip — keep polling
+      onProgress?.('Checking status...');
+      continue;
+    }
+
+    onProgress?.(job.message || `Status: ${job.status}`);
+
+    if (job.status === 'completed') {
+      if (!job.vocals || !job.karaoke) throw new Error('Job completed but URLs are missing');
+      return { vocals: job.vocals, karaoke: job.karaoke };
+    }
+
+    if (job.status === 'failed') {
+      throw new Error(job.message || 'Processing failed on the server');
+    }
+
+    // still queued / processing — keep polling
+  }
+
+  throw new Error('Timed out waiting for processing to complete (15 min limit)');
 };
 
-/**
- * Get full URL for downloading or playing audio files
- * @param relativePath - Relative path from the API response
- * @returns Full URL for the audio file
- */
-export const getAudioUrl = (relativePath: string): string => {
-  return relativePath;
-};
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-/**
- * Check if the backend is available
- * @returns Promise resolving to true if backend is reachable
- */
+export const getAudioUrl = (relativePath: string): string => relativePath;
+
 export const checkBackendHealth = async (): Promise<boolean> => {
   try {
     await apiClient.get('/health');

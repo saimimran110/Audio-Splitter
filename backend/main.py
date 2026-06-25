@@ -1,5 +1,6 @@
 
 import os
+# Set thread limits BEFORE importing torch/demucs
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -9,17 +10,28 @@ os.environ["TORCH_HOME"] = "/app/.cache"
 
 import atexit
 import asyncio
+import logging
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+# ── Logging ────────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(__name__)
 
+# ── App setup ──────────────────────────────────────────────────────────────────
 app = FastAPI()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_FOLDER = PROJECT_ROOT / "demucs_output"
@@ -27,6 +39,9 @@ FRONTEND_DIST = PROJECT_ROOT / "audio-splice-studio" / "dist"
 MODEL = os.getenv("DEMUCS_MODEL", "htdemucs")
 ADSENSE_CLIENT_ID = os.getenv("ADSENSE_CLIENT_ID", "").strip()
 ADSENSE_SLOT_ID = os.getenv("ADSENSE_SLOT_ID", "").strip()
+
+# In-memory job store  {job_id: {...}}
+JOB_STATUS: dict[str, dict[str, Any]] = {}
 
 allowed_origins = [
     origin.strip()
@@ -48,76 +63,115 @@ app.add_middleware(
 OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
 
 
+# ── Cleanup ────────────────────────────────────────────────────────────────────
 def cleanup_files():
     try:
         if OUTPUT_FOLDER.exists():
             shutil.rmtree(OUTPUT_FOLDER)
             OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
-            print("Cleaned up all generated audio files")
-    except Exception as e:
-        print(f"Error during cleanup: {e}")
+        JOB_STATUS.clear()
+        log.info("Cleaned up all generated audio files")
+    except Exception as exc:
+        log.error("Error during cleanup: %s", exc)
 
 
 atexit.register(cleanup_files)
-
 app.mount("/files", StaticFiles(directory=str(OUTPUT_FOLDER)), name="files")
 
 
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def convert_wav_to_mp3(wav_path: Path, mp3_path: Path, bitrate: str = "192k") -> None:
+    """Convert WAV → MP3 using ffmpeg (already in container)."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(wav_path),
+        "-codec:a", "libmp3lame",
+        "-b:a", bitrate,
+        "-ac", "2",
+        str(mp3_path),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    wav_path.unlink()
+    log.info("Converted %s → %s", wav_path.name, mp3_path.name)
+
+
+def run_demucs(input_path: Path, job_id: str) -> None:
+    """Run Demucs with explicit output directory named by job_id."""
+    cmd = [
+        sys.executable, "-m", "demucs.separate",
+        str(input_path),
+        "-o", str(OUTPUT_FOLDER),
+        "-n", MODEL,
+        "--two-stems=vocals",
+        "-j", "1",
+    ]
+    log.info("[job:%s] Running demucs: %s", job_id, " ".join(cmd))
+    t0 = time.time()
+    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    elapsed = time.time() - t0
+    log.info("[job:%s] Demucs finished in %.1fs", job_id, elapsed)
+    if result.stdout:
+        log.debug("[job:%s] stdout: %s", job_id, result.stdout[:500])
+    if result.stderr:
+        log.debug("[job:%s] stderr: %s", job_id, result.stderr[:500])
+
+
+async def process_job(job_id: str, input_path: Path) -> None:
+    """Background task: run demucs → convert to mp3 → update job status."""
+    try:
+        log.info("[job:%s] Starting background processing", job_id)
+        JOB_STATUS[job_id]["status"] = "processing"
+        JOB_STATUS[job_id]["message"] = "Running AI separation (this takes 3-6 min on free CPU)..."
+
+        await asyncio.to_thread(run_demucs, input_path, job_id)
+
+        # Convert WAVs to MP3
+        output_dir = OUTPUT_FOLDER / MODEL / job_id
+        JOB_STATUS[job_id]["message"] = "Converting to MP3..."
+        log.info("[job:%s] Converting WAV → MP3", job_id)
+
+        for stem in ("vocals", "no_vocals"):
+            wav = output_dir / f"{stem}.wav"
+            mp3 = output_dir / f"{stem}.mp3"
+            if wav.exists():
+                await asyncio.to_thread(convert_wav_to_mp3, wav, mp3)
+
+        vocals_mp3 = output_dir / "vocals.mp3"
+        karaoke_mp3 = output_dir / "no_vocals.mp3"
+
+        if not vocals_mp3.exists() or not karaoke_mp3.exists():
+            raise RuntimeError("MP3 output files missing after conversion")
+
+        JOB_STATUS[job_id].update({
+            "status": "completed",
+            "message": "Done!",
+            "vocals": f"/files/{MODEL}/{job_id}/vocals.mp3",
+            "karaoke": f"/files/{MODEL}/{job_id}/no_vocals.mp3",
+            "finishedAt": time.time(),
+        })
+        log.info("[job:%s] Job completed successfully", job_id)
+
+    except Exception as exc:
+        log.error("[job:%s] Job failed: %s", job_id, exc, exc_info=True)
+        JOB_STATUS[job_id].update({
+            "status": "failed",
+            "message": str(exc),
+            "finishedAt": time.time(),
+        })
+    finally:
+        if input_path.exists():
+            input_path.unlink()
+
+
+# ── Endpoints ──────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health_check():
-    return {"status": "ok"}
+    return {"status": "ok", "activeJobs": len([j for j in JOB_STATUS.values() if j.get("status") == "processing"])}
 
 
 @app.get("/config")
 async def app_config():
-    return {
-        "adsenseClientId": ADSENSE_CLIENT_ID,
-        "adsenseSlotId": ADSENSE_SLOT_ID,
-    }
-
-
-def convert_wav_to_mp3(wav_path: Path, mp3_path: Path, bitrate: str = "192k") -> None:
-    """Convert a WAV file to MP3 using ffmpeg (already installed in container)."""
-    command = [
-        "ffmpeg",
-        "-y",                    # overwrite output without asking
-        "-i", str(wav_path),
-        "-codec:a", "libmp3lame",
-        "-b:a", bitrate,
-        "-ac", "2",              # stereo
-        str(mp3_path),
-    ]
-    subprocess.run(command, check=True, capture_output=True)
-    wav_path.unlink()            # delete large WAV after conversion
-
-
-def run_demucs(input_path: Path) -> subprocess.CompletedProcess:
-    command = [
-        sys.executable,
-        "-m",
-        "demucs.separate",
-        str(input_path),
-        "-o",
-        str(OUTPUT_FOLDER),
-        "-n",
-        MODEL,
-        "--two-stems=vocals",
-        "-j",
-        "1",
-    ]
-    return subprocess.run(command, check=True, capture_output=True, text=True)
-
-
-def run_demucs_and_convert(input_path: Path, job_id: str) -> None:
-    """Run Demucs then convert output WAVs to MP3."""
-    run_demucs(input_path)
-
-    output_dir = OUTPUT_FOLDER / MODEL / job_id
-    for stem in ("vocals", "no_vocals"):
-        wav_file = output_dir / f"{stem}.wav"
-        mp3_file = output_dir / f"{stem}.mp3"
-        if wav_file.exists():
-            convert_wav_to_mp3(wav_file, mp3_file)
+    return {"adsenseClientId": ADSENSE_CLIENT_ID, "adsenseSlotId": ADSENSE_SLOT_ID}
 
 
 @app.post("/split")
@@ -125,46 +179,45 @@ async def split_song(file: UploadFile = File(...)):
     if not file.filename:
         raise HTTPException(status_code=400, detail="File name is required")
 
-    original_name = Path(file.filename).name
-    suffix = Path(original_name).suffix.lower()
+    suffix = Path(file.filename).suffix.lower()
     if suffix not in {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg", ".webm", ".wma"}:
         raise HTTPException(status_code=400, detail="Unsupported audio format")
 
     job_id = uuid.uuid4().hex
     input_path = PROJECT_ROOT / f"{job_id}{suffix}"
-    input_path.parent.mkdir(parents=True, exist_ok=True)
 
-    max_size = 20 * 1024 * 1024  # 20MB limit
+    # Save uploaded file (max 20 MB)
+    max_size = 20 * 1024 * 1024
     size = 0
-    with input_path.open("wb") as buffer:
+    with input_path.open("wb") as buf:
         for chunk in iter(lambda: file.file.read(1024 * 1024), b""):
             size += len(chunk)
             if size > max_size:
-                buffer.close()
-                input_path.unlink()
-                raise HTTPException(status_code=413, detail="File is too large. Maximum size is 20MB.")
-            buffer.write(chunk)
+                buf.close()
+                input_path.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail="File too large (max 20 MB)")
+            buf.write(chunk)
 
-    try:
-        await asyncio.to_thread(run_demucs_and_convert, input_path, job_id)
-    except subprocess.CalledProcessError as e:
-        error_output = (e.stderr or e.stdout or str(e)).strip()
-        raise HTTPException(status_code=500, detail=f"Processing failed: {error_output}") from e
-    finally:
-        if input_path.exists():
-            input_path.unlink()
+    log.info("[job:%s] Received %.2f MB file (%s)", job_id, size / 1024 / 1024, suffix)
 
-    output_dir = OUTPUT_FOLDER / MODEL / job_id
-    vocals_file = output_dir / "vocals.mp3"
-    karaoke_file = output_dir / "no_vocals.mp3"
-
-    if not vocals_file.exists() or not karaoke_file.exists():
-        raise HTTPException(status_code=500, detail="Expected output MP3 files were not created")
-
-    return {
-        "vocals": f"/files/{MODEL}/{job_id}/vocals.mp3",
-        "karaoke": f"/files/{MODEL}/{job_id}/no_vocals.mp3",
+    JOB_STATUS[job_id] = {
+        "status": "queued",
+        "message": "Job queued, starting soon...",
+        "createdAt": time.time(),
     }
+
+    # Fire and forget — do NOT await
+    asyncio.create_task(process_job(job_id, input_path))
+
+    return {"jobId": job_id, "status": "queued"}
+
+
+@app.get("/jobs/{job_id}")
+async def get_job(job_id: str):
+    job = JOB_STATUS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"jobId": job_id, **job}
 
 
 @app.post("/cleanup")
