@@ -43,15 +43,7 @@ app = FastAPI()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_FOLDER = PROJECT_ROOT / "demucs_output"
 FRONTEND_DIST = PROJECT_ROOT / "audio-splice-studio" / "dist"
-# Default model detection with local fallback
-default_model = "mdx_extra"
-try:
-    import diffq
-    default_model = "mdx_extra_q"
-except ImportError:
-    pass
-
-MODEL = os.getenv("DEMUCS_MODEL", default_model)
+MODEL = os.getenv("DEMUCS_MODEL", "mdx_extra")
 ADSENSE_CLIENT_ID = os.getenv("ADSENSE_CLIENT_ID", "").strip()
 ADSENSE_SLOT_ID = os.getenv("ADSENSE_SLOT_ID", "").strip()
 
