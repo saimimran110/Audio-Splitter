@@ -6,7 +6,8 @@ os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["TORCH_HOME"] = "/app/.cache"
+os.environ["TORCH_HOME"] = "/app/.cache/torch"
+os.environ["HF_HOME"] = "/app/.cache/hub"
 
 import atexit
 import asyncio
@@ -36,7 +37,15 @@ app = FastAPI()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_FOLDER = PROJECT_ROOT / "demucs_output"
 FRONTEND_DIST = PROJECT_ROOT / "audio-splice-studio" / "dist"
-MODEL = os.getenv("DEMUCS_MODEL", "htdemucs")
+# Default model detection with local fallback
+default_model = "mdx_extra"
+try:
+    import diffq
+    default_model = "mdx_extra_q"
+except ImportError:
+    pass
+
+MODEL = os.getenv("DEMUCS_MODEL", default_model)
 ADSENSE_CLIENT_ID = os.getenv("ADSENSE_CLIENT_ID", "").strip()
 ADSENSE_SLOT_ID = os.getenv("ADSENSE_SLOT_ID", "").strip()
 
@@ -80,6 +89,19 @@ app.mount("/files", StaticFiles(directory=str(OUTPUT_FOLDER)), name="files")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+def resample_audio(input_path: Path, output_path: Path) -> None:
+    """Resample input audio to 44100Hz stereo WAV using ffmpeg."""
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(input_path),
+        "-ac", "2",
+        "-ar", "44100",
+        str(output_path),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    log.info("Resampled %s → %s (44100Hz stereo WAV)", input_path.name, output_path.name)
+
+
 def convert_wav_to_mp3(wav_path: Path, mp3_path: Path, bitrate: str = "192k") -> None:
     """Convert WAV → MP3 using ffmpeg (already in container)."""
     cmd = [
@@ -103,6 +125,7 @@ def run_demucs(input_path: Path, job_id: str) -> None:
         "-o", str(OUTPUT_FOLDER),
         "-n", MODEL,
         "--two-stems=vocals",
+        "--segment", "30",
         "-j", "1",
     ]
     log.info("[job:%s] Running demucs: %s", job_id, " ".join(cmd))
@@ -117,12 +140,28 @@ def run_demucs(input_path: Path, job_id: str) -> None:
 
 
 async def process_job(job_id: str, input_path: Path) -> None:
-    """Background task: run demucs → convert to mp3 → update job status."""
+    """Background task: resample → run demucs → convert to mp3 → update job status."""
     try:
         log.info("[job:%s] Starting background processing", job_id)
+        if job_id not in JOB_STATUS:
+            JOB_STATUS[job_id] = {"createdAt": time.time()}
         JOB_STATUS[job_id]["status"] = "processing"
-        JOB_STATUS[job_id]["message"] = "Running AI separation (this takes 3-6 min on free CPU)..."
+        JOB_STATUS[job_id]["message"] = "Preparing audio file (resampling to 44.1kHz stereo)..."
 
+        # 1. Resample to standard 44.1kHz Stereo WAV
+        resampled_path = input_path.parent / f"{job_id}_resampled.wav"
+        await asyncio.to_thread(resample_audio, input_path, resampled_path)
+
+        # 2. Delete original upload to save space
+        if input_path.exists():
+            input_path.unlink()
+
+        # 3. Rename resampled WAV to job_id.wav to keep output folder names consistent
+        final_wav_path = input_path.parent / f"{job_id}.wav"
+        resampled_path.rename(final_wav_path)
+        input_path = final_wav_path
+
+        JOB_STATUS[job_id]["message"] = f"Running AI separation using {MODEL} (takes ~1.5 min)..."
         await asyncio.to_thread(run_demucs, input_path, job_id)
 
         # Convert WAVs to MP3
@@ -158,6 +197,8 @@ async def process_job(job_id: str, input_path: Path) -> None:
 
     except Exception as exc:
         log.error("[job:%s] Job failed: %s", job_id, exc, exc_info=True)
+        if job_id not in JOB_STATUS:
+            JOB_STATUS[job_id] = {"createdAt": time.time()}
         JOB_STATUS[job_id].update({
             "status": "failed",
             "message": str(exc),
