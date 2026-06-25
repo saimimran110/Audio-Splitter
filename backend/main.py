@@ -142,6 +142,11 @@ async def process_job(job_id: str, input_path: Path) -> None:
         if not vocals_mp3.exists() or not karaoke_mp3.exists():
             raise RuntimeError("MP3 output files missing after conversion")
 
+        min_size = 10 * 1024  # 10 KB minimum — empty files mean Demucs failed silently
+        for mp3 in (vocals_mp3, karaoke_mp3):
+            if mp3.stat().st_size < min_size:
+                raise RuntimeError(f"Output file {mp3.name} is too small ({mp3.stat().st_size} bytes) — processing may have failed silently")
+
         JOB_STATUS[job_id].update({
             "status": "completed",
             "message": "Done!",

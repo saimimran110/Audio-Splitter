@@ -16,6 +16,7 @@ export const AudioPlayer = ({ title, audioUrl, downloadUrl, icon, variant }: Aud
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [audioError, setAudioError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const progressBarRef = useRef<HTMLDivElement>(null);
 
@@ -26,28 +27,45 @@ export const AudioPlayer = ({ title, audioUrl, downloadUrl, icon, variant }: Aud
     const updateTime = () => setCurrentTime(audio.currentTime);
     const updateDuration = () => setDuration(audio.duration);
     const handleEnded = () => setIsPlaying(false);
+    const handleError = () => {
+      setAudioError('Could not load audio. The file may still be processing.');
+      setIsPlaying(false);
+    };
 
     audio.addEventListener('timeupdate', updateTime);
     audio.addEventListener('loadedmetadata', updateDuration);
     audio.addEventListener('ended', handleEnded);
+    audio.addEventListener('error', handleError);
 
     return () => {
       audio.removeEventListener('timeupdate', updateTime);
       audio.removeEventListener('loadedmetadata', updateDuration);
       audio.removeEventListener('ended', handleEnded);
+      audio.removeEventListener('error', handleError);
     };
-  }, []);
+  }, [audioUrl]);
 
-  const togglePlay = () => {
+  const togglePlay = async () => {
     const audio = audioRef.current;
     if (!audio) return;
 
     if (isPlaying) {
       audio.pause();
+      setIsPlaying(false);
     } else {
-      audio.play();
+      try {
+        setAudioError(null);
+        await audio.play();
+        setIsPlaying(true);
+      } catch (err) {
+        const name = (err as Error)?.name;
+        if (name !== 'AbortError') {
+          console.error('Playback error:', err);
+          setAudioError('Playback failed. Try clicking play again.');
+        }
+        setIsPlaying(false);
+      }
     }
-    setIsPlaying(!isPlaying);
   };
 
   const handleDownload = () => {
@@ -92,6 +110,9 @@ export const AudioPlayer = ({ title, audioUrl, downloadUrl, icon, variant }: Aud
       </CardHeader>
       
       <CardContent className="space-y-4">
+        {audioError && (
+          <p className="text-xs text-destructive text-center">{audioError}</p>
+        )}
         <div 
           ref={progressBarRef}
           className="waveform-visual relative overflow-hidden cursor-pointer h-4 bg-muted rounded-full"
