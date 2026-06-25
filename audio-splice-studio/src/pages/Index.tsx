@@ -23,9 +23,17 @@ const Index = () => {
     
     try {
       const splitResult = await splitAudio(file, setStatusMessage);
+      console.log('[MusicSplitter] Split result:', splitResult);
+      
+      // Validate result has actual URLs
+      if (!splitResult?.vocals || !splitResult?.karaoke) {
+        throw new Error('Processing completed but audio URLs are missing. Please hard-refresh (Ctrl+Shift+R) and try again.');
+      }
+      
       setResult(splitResult);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to process audio file');
+      setSelectedFile(null);  // allow re-upload
     } finally {
       setIsProcessing(false);
       setStatusMessage('');
