@@ -8,7 +8,6 @@ os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["TORCH_HOME"] = "/app/.cache/torch"
 os.environ["HF_HOME"] = "/app/.cache/hub"
-
 import atexit
 import asyncio
 import logging
@@ -40,7 +39,7 @@ FRONTEND_DIST = PROJECT_ROOT / "audio-splice-studio" / "dist"
 # Default model detection with local fallback
 default_model = "mdx_extra"
 try:
-    import diffq
+    
     default_model = "mdx_extra_q"
 except ImportError:
     pass
