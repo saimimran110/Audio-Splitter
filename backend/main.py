@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any
 
 import re
+import yt_dlp
+from pydantic import BaseModel
 from fastapi import FastAPI, File, HTTPException, UploadFile, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -281,6 +283,57 @@ async def process_job(job_id: str, input_path: Path) -> None:
             input_path.unlink()
 
 
+async def process_youtube_job(job_id: str, video_id: str) -> None:
+    """Background task: download audio from YouTube, then split."""
+    input_path = None
+    try:
+        log.info("[job:%s] Starting YouTube audio download for video_id: %s", job_id, video_id)
+        if job_id not in JOB_STATUS:
+            JOB_STATUS[job_id] = {"createdAt": time.time()}
+        JOB_STATUS[job_id].update({
+            "status": "processing",
+            "message": "Downloading audio from YouTube...",
+        })
+
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        out_tmpl = str(PROJECT_ROOT / f"{job_id}.%(ext)s")
+        
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': out_tmpl,
+            'quiet': True,
+        }
+
+        def download():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([video_url])
+
+        await asyncio.to_thread(download)
+
+        # Resolve the downloaded file path
+        files = list(PROJECT_ROOT.glob(f"{job_id}.*"))
+        if not files:
+            raise RuntimeError("YouTube audio download failed — file not found on disk")
+        
+        input_path = files[0]
+        log.info("[job:%s] YouTube download complete. File: %s", job_id, input_path.name)
+
+        # Delegate the rest to the standard process_job function
+        await process_job(job_id, input_path)
+
+    except Exception as exc:
+        log.error("[job:%s] YouTube download/process failed: %s", job_id, exc, exc_info=True)
+        if job_id not in JOB_STATUS:
+            JOB_STATUS[job_id] = {"createdAt": time.time()}
+        JOB_STATUS[job_id].update({
+            "status": "failed",
+            "message": str(exc),
+            "finishedAt": time.time(),
+        })
+        if input_path and input_path.exists():
+            input_path.unlink()
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health_check():
@@ -336,6 +389,63 @@ async def get_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"jobId": job_id, **job}
+
+
+@app.get("/youtube/search")
+async def youtube_search(query: str):
+    if not query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+        
+    ydl_opts = {
+        'quiet': True,
+        'extract_flat': 'in_playlist',
+        'skip_download': True,
+    }
+    
+    def search():
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(f"ytsearch5:{query}", download=False)
+            
+    try:
+        result = await asyncio.to_thread(search)
+        entries = result.get('entries', [])
+        formatted_results = []
+        for entry in entries:
+            if not entry:
+                continue
+            formatted_results.append({
+                "id": entry.get("id"),
+                "title": entry.get("title"),
+                "duration": entry.get("duration"),
+                "thumbnail": entry.get("thumbnail") or (entry.get("thumbnails", [{}])[0].get("url") if entry.get("thumbnails") else None),
+            })
+        return formatted_results
+    except Exception as exc:
+        log.error("YouTube search failed for query '%s': %s", query, exc)
+        raise HTTPException(status_code=500, detail=f"YouTube search failed: {str(exc)}")
+
+
+class YouTubeSplitRequest(BaseModel):
+    videoId: str
+
+
+@app.post("/youtube/split")
+async def youtube_split(req: YouTubeSplitRequest):
+    if not req.videoId.strip():
+        raise HTTPException(status_code=400, detail="videoId is required")
+        
+    job_id = uuid.uuid4().hex
+    
+    JOB_STATUS[job_id] = {
+        "status": "queued",
+        "message": "Job queued, downloading YouTube audio soon...",
+        "createdAt": time.time(),
+    }
+    
+    # Fire and forget
+    asyncio.create_task(process_youtube_job(job_id, req.videoId))
+    
+    return {"jobId": job_id, "status": "queued"}
 
 
 @app.post("/cleanup")

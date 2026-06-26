@@ -4,8 +4,8 @@ import { AudioPlayer } from '@/components/AudioPlayer';
 import { AdSenseSlot } from '@/components/AdSenseSlot';
 import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Mic, Music2, Sparkles, AlertCircle, Instagram } from 'lucide-react';
-import { splitAudio, getAudioUrl, SplitResult } from '@/services/api';
+import { Mic, Music2, Sparkles, AlertCircle, Instagram, Search, Youtube, Loader2 } from 'lucide-react';
+import { splitAudio, getAudioUrl, SplitResult, searchYouTube, splitYouTubeAudio, YouTubeResult } from '@/services/api';
 
 /* ─── Animated Split Waveform Visual ─── */
 const SplitWaveformVisual = () => {
@@ -196,6 +196,78 @@ const Index = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const featureCardsRef = useRef<HTMLDivElement>(null);
 
+  const [activeTab, setActiveTab] = useState<'upload' | 'search'>('upload');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<YouTubeResult[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const lastQueryRef = useRef('');
+
+  const handleSearch = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const query = searchQuery.trim();
+    if (!query || query === lastQueryRef.current) return;
+
+    lastQueryRef.current = query;
+    setIsSearching(true);
+    setError(null);
+    try {
+      const results = await searchYouTube(query);
+      setSearchResults(results);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'YouTube search failed');
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  // Debounced search
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (!query) {
+      setSearchResults([]);
+      lastQueryRef.current = '';
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      handleSearch();
+    }, 600);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  const handleYouTubeSplit = async (videoId: string, songTitle: string) => {
+    const dummyFile = new File([], `${songTitle}.mp3`, { type: 'audio/mpeg' });
+    setSelectedFile(dummyFile);
+    setIsProcessing(true);
+    setIsCompleting(false);
+    setError(null);
+    setPendingResult(null);
+    setStatusMessage('Job queued — downloading YouTube audio...');
+    try {
+      const splitResult = await splitYouTubeAudio(videoId, setStatusMessage);
+      if (!splitResult?.vocals || !splitResult?.karaoke) {
+        throw new Error('Processing completed but audio URLs are missing. Please hard-refresh (Ctrl+Shift+R) and try again.');
+      }
+      setPendingResult(splitResult);
+      setIsCompleting(true);
+      setStatusMessage('');
+      setTimeout(() => {
+        setResult(splitResult);
+        setIsProcessing(false);
+        setIsCompleting(false);
+        setPendingResult(null);
+      }, 2000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to process audio file');
+      setSelectedFile(null);
+      setIsProcessing(false);
+      setIsCompleting(false);
+      setStatusMessage('');
+    }
+  };
+
   // Scroll reveal for feature cards
   useEffect(() => {
     const container = featureCardsRef.current;
@@ -324,7 +396,7 @@ const Index = () => {
               style={{ minHeight: 'calc(100vh - 200px)', display: 'flex', flexDirection: 'column', justifyContent: 'center' }}
             >
               {/* Title */}
-              <div className="text-center mb-10" style={{ marginTop: '-40px' }}>
+              <div className="text-center mb-6" style={{ marginTop: '-40px' }}>
                 <h2
                   style={{
                     fontSize: 'clamp(28px, 5vw, 48px)',
@@ -341,47 +413,152 @@ const Index = () => {
                 </p>
               </div>
 
-              {/* Animated Split Waveform */}
-              <div className="mb-10">
-                <SplitWaveformVisual />
+              {/* Tab Selector */}
+              <div className="flex justify-center mb-10">
+                <div className="bg-background/40 backdrop-blur-md border border-white/10 p-1 rounded-full flex gap-1">
+                  <button
+                    onClick={() => setActiveTab('upload')}
+                    className={`px-6 py-2 rounded-full text-sm font-semibold transition-all duration-300 flex items-center gap-2 ${
+                      activeTab === 'upload'
+                        ? 'bg-primary/20 text-primary-glow border border-primary/30 shadow-glow'
+                        : 'text-muted-foreground hover:text-foreground hover:bg-white/5 border border-transparent'
+                    }`}
+                  >
+                    <Music2 className="h-4 w-4" />
+                    Upload Audio
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('search')}
+                    className={`px-6 py-2 rounded-full text-sm font-semibold transition-all duration-300 flex items-center gap-2 ${
+                      activeTab === 'search'
+                        ? 'bg-primary/20 text-primary-glow border border-primary/30 shadow-glow'
+                        : 'text-muted-foreground hover:text-foreground hover:bg-white/5 border border-transparent'
+                    }`}
+                  >
+                    <Search className="h-4 w-4" />
+                    Search YouTube
+                  </button>
+                </div>
               </div>
 
-              {/* Browse Button */}
-              <div className="text-center">
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="btn-shimmer btn-press"
-                  style={{
-                    padding: '14px 40px',
-                    fontSize: '15px',
-                    fontWeight: 600,
-                    fontFamily: 'Poppins, sans-serif',
-                    color: '#e5e7eb',
-                    background: 'rgba(255,255,255,0.06)',
-                    border: '1px solid rgba(255,255,255,0.12)',
-                    borderRadius: '10px',
-                    cursor: 'pointer',
-                    transition: 'all 0.25s ease',
-                    position: 'relative',
-                    overflow: 'hidden',
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.background = 'rgba(255,255,255,0.10)';
-                    e.currentTarget.style.borderColor = 'rgba(139,92,246,0.5)';
-                    e.currentTarget.style.boxShadow = '0 0 25px rgba(139,92,246,0.15)';
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
-                    e.currentTarget.style.borderColor = 'rgba(255,255,255,0.12)';
-                    e.currentTarget.style.boxShadow = 'none';
-                  }}
-                >
-                  Browse my files
-                </button>
-                <p style={{ fontSize: '12px', color: '#6b7280', marginTop: '12px' }}>
-                  or drop a file here · MP3, WAV · Max 20MB
-                </p>
-              </div>
+              {activeTab === 'upload' && (
+                <div className="space-y-10 fade-in-section">
+                  {/* Animated Split Waveform */}
+                  <div>
+                    <SplitWaveformVisual />
+                  </div>
+
+                  {/* Browse Button */}
+                  <div className="text-center">
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="btn-shimmer btn-press"
+                      style={{
+                        padding: '14px 40px',
+                        fontSize: '15px',
+                        fontWeight: 600,
+                        fontFamily: 'Poppins, sans-serif',
+                        color: '#e5e7eb',
+                        background: 'rgba(255,255,255,0.06)',
+                        border: '1px solid rgba(255,255,255,0.12)',
+                        borderRadius: '10px',
+                        cursor: 'pointer',
+                        transition: 'all 0.25s ease',
+                        position: 'relative',
+                        overflow: 'hidden',
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = 'rgba(255,255,255,0.10)';
+                        e.currentTarget.style.borderColor = 'rgba(139,92,246,0.5)';
+                        e.currentTarget.style.boxShadow = '0 0 25px rgba(139,92,246,0.15)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'rgba(255,255,255,0.06)';
+                        e.currentTarget.style.borderColor = 'rgba(255,255,255,0.12)';
+                        e.currentTarget.style.boxShadow = 'none';
+                      }}
+                    >
+                      Browse my files
+                    </button>
+                    <p style={{ fontSize: '12px', color: '#6b7280', marginTop: '12px' }}>
+                      or drop a file here · MP3, WAV · Max 20MB
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === 'search' && (
+                <div className="w-full max-w-2xl mx-auto space-y-6 fade-in-section">
+                  {/* Search Input Bar */}
+                  <form onSubmit={handleSearch} className="flex gap-2 p-1.5 bg-background/50 backdrop-blur-md border border-white/10 rounded-xl shadow-inner-glow focus-within:border-primary/40 focus-within:shadow-glow transition-all duration-300">
+                    <div className="flex-1 flex items-center pl-3 gap-2">
+                      <Search className="h-5 w-5 text-muted-foreground" />
+                      <input
+                        type="text"
+                        placeholder="Search song name or artist on YouTube..."
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        className="w-full bg-transparent border-0 outline-none text-foreground placeholder:text-muted-foreground text-sm py-2"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={isSearching}
+                      className="px-6 py-2 bg-primary/20 hover:bg-primary/30 border border-primary/30 hover:border-primary/50 text-primary-glow font-semibold text-sm rounded-lg transition-all duration-300 flex items-center gap-2 btn-press disabled:opacity-50"
+                    >
+                      {isSearching ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Searching...
+                        </>
+                      ) : (
+                        'Search'
+                      )}
+                    </button>
+                  </form>
+
+                  {/* Search Results */}
+                  {searchResults.length > 0 && (
+                    <div className="space-y-3 pt-2">
+                      {searchResults.map((video) => (
+                        <div
+                          key={video.id}
+                          className="flex flex-col sm:flex-row items-center justify-between p-4 bg-background/40 backdrop-blur-md border border-white/5 rounded-xl hover:border-primary/30 hover:bg-background/60 transition-all duration-300 gap-4"
+                        >
+                          <div className="flex items-center gap-4 w-full sm:w-auto">
+                            <img
+                              src={video.thumbnail}
+                              alt={video.title}
+                              className="w-24 h-16 object-cover rounded-lg border border-white/10 flex-shrink-0"
+                            />
+                            <div className="min-w-0">
+                              <h4 className="font-medium text-foreground text-sm sm:text-base line-clamp-2" title={video.title}>
+                                {video.title}
+                              </h4>
+                              <p className="text-xs text-muted-foreground mt-1">
+                                Duration: {Math.floor(video.duration / 60)}:{(video.duration % 60).toString().padStart(2, '0')}
+                              </p>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => handleYouTubeSplit(video.id, video.title)}
+                            className="w-full sm:w-auto px-4 py-2.5 bg-primary/10 hover:bg-primary/20 border border-primary/20 hover:border-primary/40 text-primary-glow font-medium text-xs sm:text-sm rounded-lg transition-all duration-300 flex items-center justify-center gap-2 btn-press whitespace-nowrap"
+                          >
+                            <Sparkles className="h-4 w-4" />
+                            Separate Vocals & Karaoke
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {!isSearching && searchResults.length === 0 && searchQuery && (
+                    <div className="text-center py-8 text-muted-foreground text-sm">
+                      No results found. Try searching for a different song name.
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Drag overlay */}
               {dragOver && (

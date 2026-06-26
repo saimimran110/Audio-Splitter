@@ -17,33 +17,20 @@ export interface JobStatus {
   karaoke?: string;
 }
 
+export interface YouTubeResult {
+  id: string;
+  title: string;
+  duration: number;
+  thumbnail: string;
+}
+
 /**
- * Upload audio file, then poll until the job finishes.
- * This avoids the Hugging Face 60-second reverse-proxy timeout
- * because we never hold a single HTTP connection open for the full
- * duration of the Demucs run.
+ * Poll /jobs/{jobId} every 4 seconds until done or failed.
  */
-export const splitAudio = async (
-  file: File,
+export const pollJob = async (
+  jobId: string,
   onProgress?: (message: string) => void,
 ): Promise<SplitResult> => {
-  // 1. Upload and get a job ID immediately
-  const formData = new FormData();
-  formData.append('file', file);
-
-  let jobId: string;
-  try {
-    const res = await apiClient.post<{ jobId: string }>('/split', formData);
-    jobId = res.data.jobId;
-    onProgress?.('Job started — AI separation in progress...');
-  } catch (err) {
-    if (axios.isAxiosError(err)) {
-      throw new Error(err.response?.data?.detail || `Upload failed: ${err.message}`);
-    }
-    throw new Error('Upload failed: unexpected error');
-  }
-
-  // 2. Poll /jobs/{jobId} every 4 seconds until done or failed
   const POLL_INTERVAL_MS = 4000;
   const MAX_WAIT_MS = 15 * 60 * 1000; // 15 minutes absolute ceiling
   const started = Date.now();
@@ -76,6 +63,71 @@ export const splitAudio = async (
   }
 
   throw new Error('Timed out waiting for processing to complete (15 min limit)');
+};
+
+/**
+ * Upload audio file, then poll until the job finishes.
+ */
+export const splitAudio = async (
+  file: File,
+  onProgress?: (message: string) => void,
+): Promise<SplitResult> => {
+  // 1. Upload and get a job ID immediately
+  const formData = new FormData();
+  formData.append('file', file);
+
+  let jobId: string;
+  try {
+    const res = await apiClient.post<{ jobId: string }>('/split', formData);
+    jobId = res.data.jobId;
+    onProgress?.('Job started — AI separation in progress...');
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      throw new Error(err.response?.data?.detail || `Upload failed: ${err.message}`);
+    }
+    throw new Error('Upload failed: unexpected error');
+  }
+
+  // 2. Poll job until completion
+  return pollJob(jobId, onProgress);
+};
+
+/**
+ * Search YouTube via backend.
+ */
+export const searchYouTube = async (query: string): Promise<YouTubeResult[]> => {
+  try {
+    const res = await apiClient.get<YouTubeResult[]>('/youtube/search', { params: { query } });
+    return res.data;
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      throw new Error(err.response?.data?.detail || `Search failed: ${err.message}`);
+    }
+    throw new Error('Search failed: unexpected error');
+  }
+};
+
+/**
+ * Split audio from YouTube video ID directly.
+ */
+export const splitYouTubeAudio = async (
+  videoId: string,
+  onProgress?: (message: string) => void,
+): Promise<SplitResult> => {
+  let jobId: string;
+  try {
+    const res = await apiClient.post<{ jobId: string }>('/youtube/split', { videoId });
+    jobId = res.data.jobId;
+    onProgress?.('Job queued — downloading YouTube audio...');
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      throw new Error(err.response?.data?.detail || `YouTube split request failed: ${err.message}`);
+    }
+    throw new Error('YouTube split request failed: unexpected error');
+  }
+
+  // Poll job until completion
+  return pollJob(jobId, onProgress);
 };
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
