@@ -392,266 +392,273 @@ async def get_job(job_id: str):
     return {"jobId": job_id, **job}
 
 
+# ── YouTube Search Strategies (Module Level) ──
+
+# ── Strategy 1: YouTube InnerTube API (WEB client with public API key) ──
+async def innertube_search(q: str) -> list[dict]:
+    # YouTube's publicly-embedded InnerTube API key (not a personal/private key)
+    api_key = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+    url = f"https://www.youtube.com/youtubei/v1/search?key={api_key}"
+    payload = {
+        "context": {
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": "2.20240530.02.00",
+                "hl": "en",
+                "gl": "US",
+            }
+        },
+        "query": q,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Origin": "https://www.youtube.com",
+        "Referer": "https://www.youtube.com/",
+    }
+    async with httpx.AsyncClient(timeout=3.0) as client:
+        resp = await client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+    # Parse InnerTube response — handle both WEB and mobile response layouts
+    results = []
+    # WEB client uses twoColumnSearchResultsRenderer
+    contents = (
+        data.get("contents", {})
+        .get("twoColumnSearchResultsRenderer", {})
+        .get("primaryContents", {})
+        .get("sectionListRenderer", {})
+        .get("contents", [])
+    )
+    # Fallback: mobile clients use sectionListRenderer directly
+    if not contents:
+        contents = (
+            data.get("contents", {})
+            .get("sectionListRenderer", {})
+            .get("contents", [])
+        )
+    for section in contents:
+        items = section.get("itemSectionRenderer", {}).get("contents", [])
+        for item in items:
+            vr = item.get("videoRenderer") or item.get("compactVideoRenderer")
+            if not vr:
+                continue
+            vid = vr.get("videoId")
+            title_runs = vr.get("title", {}).get("runs", [])
+            title = title_runs[0].get("text") if title_runs else vr.get("title", {}).get("simpleText", "")
+            # Duration parsing: "3:24" → 204
+            dur_text = vr.get("lengthText", {}).get("simpleText", "")
+            dur_secs = 0
+            if dur_text:
+                parts = dur_text.split(":")
+                try:
+                    if len(parts) == 2:
+                        dur_secs = int(parts[0]) * 60 + int(parts[1])
+                    elif len(parts) == 3:
+                        dur_secs = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                except ValueError:
+                    dur_secs = 0
+            thumb = None
+            thumbs = vr.get("thumbnail", {}).get("thumbnails", [])
+            if thumbs:
+                thumb = thumbs[-1].get("url")
+            if vid:
+                results.append({"id": vid, "title": title, "duration": dur_secs, "thumbnail": thumb})
+            if len(results) >= 5:
+                break
+        if len(results) >= 5:
+            break
+    return results
+
+
+# ── Strategy 2: Dynamic Invidious API Fallback ──
+async def invidious_search(q: str) -> list[dict]:
+    instances = [
+        "https://invidious.projectsegfau.lt",
+        "https://yewtu.be",
+        "https://vid.puffyan.us",
+        "https://invidious.nerdvpn.de",
+        "https://invidious.privacydev.net",
+    ]
+    # Let's dynamically try fetching healthy instances list from invidious API
+    async with httpx.AsyncClient(timeout=3.0) as client:
+        try:
+            resp = await client.get("https://api.invidious.io/json/v1/instances?sort_by=type,health", headers={"Accept": "application/json"})
+            if resp.status_code == 200:
+                data = resp.json()
+                dynamic_instances = []
+                for item in data:
+                    details = item[1]
+                    if details.get("type") == "https" and details.get("monitor", {}).get("status") == "up":
+                        uri = details.get("uri")
+                        if uri and details.get("api", True):
+                            dynamic_instances.append(uri)
+                if dynamic_instances:
+                    instances = dynamic_instances[:8] + instances
+        except Exception as e:
+            log.warning("Failed to fetch dynamic Invidious list: %s", e)
+
+    async with httpx.AsyncClient(timeout=4.0) as client:
+        attempts = 0
+        for instance in instances:
+            if attempts >= 2:
+                break
+            try:
+                url = f"{instance.rstrip('/')}/api/v1/search"
+                resp = await client.get(url, params={"q": q, "type": "video"})
+                resp.raise_for_status()
+                data = resp.json()
+                results = []
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    video_id = item.get("videoId")
+                    title = item.get("title")
+                    duration = item.get("lengthSeconds", 0)
+                    thumbnails = item.get("videoThumbnails", [])
+                    thumbnail_url = thumbnails[0].get("url") if thumbnails else f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+                    if video_id and title:
+                        results.append({
+                            "id": video_id,
+                            "title": title,
+                            "duration": duration,
+                            "thumbnail": thumbnail_url
+                        })
+                        if len(results) >= 5:
+                            break
+                if results:
+                    return results
+            except Exception as e:
+                log.warning("Invidious instance %s failed: %s", instance, e)
+                attempts += 1
+                continue
+    raise RuntimeError("All Invidious instances failed")
+
+
+# ── Strategy 3: Piped API Fallback ──
+async def piped_search(q: str) -> list[dict]:
+    instances = [
+        "https://pipedapi.kavin.rocks",
+        "https://pipedapi.adminforge.de",
+        "https://api.piped.yt",
+        "https://pipedapi.in.projectsegfau.lt",
+    ]
+    async with httpx.AsyncClient(timeout=3.0) as client:
+        attempts = 0
+        for base_url in instances:
+            if attempts >= 2:
+                break
+            try:
+                resp = await client.get(f"{base_url}/search", params={"q": q, "filter": "videos"})
+                resp.raise_for_status()
+                data = resp.json()
+                items = data.get("items", data) if isinstance(data, dict) else data
+                results = []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    vid = item.get("url", "").split("v=")[-1] if "v=" in item.get("url", "") else item.get("url", "").lstrip("/watch?v=")
+                    if not vid or vid.startswith("/"):
+                        url_str = item.get("url", "")
+                        if "/watch?v=" in url_str:
+                            vid = url_str.split("/watch?v=")[-1].split("&")[0]
+                        else:
+                            continue
+                    results.append({
+                        "id": vid,
+                        "title": item.get("title", ""),
+                        "duration": item.get("duration", 0),
+                        "thumbnail": item.get("thumbnail", ""),
+                    })
+                    if len(results) >= 5:
+                        break
+                if results:
+                    return results
+            except Exception as e:
+                log.warning("Piped instance %s failed: %s", base_url, e)
+                attempts += 1
+                continue
+    raise RuntimeError("All Piped instances failed")
+
+
+# ── Strategy 4: DuckDuckGo HTML Search Fallback (Extremely robust to cloud blocks) ──
+async def ddg_search(q: str) -> list[dict]:
+    import urllib.parse
+    url = "https://html.duckduckgo.com/html/"
+    params = {"q": f"{q} site:youtube.com/watch"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    async with httpx.AsyncClient(timeout=4.0) as client:
+        resp = await client.get(url, params=params, headers=headers)
+        resp.raise_for_status()
+        html = resp.text
+
+    matches = re.finditer(r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, re.DOTALL)
+    results = []
+    seen_ids = set()
+    for match in matches:
+        href = match.group(1)
+        raw_title = match.group(2)
+        title = re.sub(r'<[^>]+>', '', raw_title).strip()
+        href_decoded = urllib.parse.unquote(href)
+        id_match = re.search(r'watch\?v=([a-zA-Z0-9_-]{11})', href_decoded)
+        if id_match:
+            video_id = id_match.group(1)
+            if video_id not in seen_ids:
+                seen_ids.add(video_id)
+                results.append({
+                    "id": video_id,
+                    "title": title,
+                    "duration": 0,
+                    "thumbnail": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+                })
+                if len(results) >= 5:
+                    break
+    return results
+
+
+# ── Strategy 5: yt-dlp fallback ──
+async def ytdlp_search(q: str) -> list[dict]:
+    ydl_opts = {
+        'quiet': True,
+        'extract_flat': 'in_playlist',
+        'skip_download': True,
+        'socket_timeout': 5,
+        'retries': 1,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'tvhtml5', 'web'],
+            }
+        }
+    }
+    def do_search():
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(f"ytsearch5:{q}", download=False)
+    result = await asyncio.to_thread(do_search)
+    entries = result.get('entries', [])
+    formatted = []
+    for entry in entries:
+        if not entry:
+            continue
+        thumbnail_url = entry.get("thumbnail")
+        if not thumbnail_url and entry.get("thumbnails"):
+            thumbnail_url = entry.get("thumbnails", [{}])[0].get("url")
+        formatted.append({
+            "id": entry.get("id"),
+            "title": entry.get("title"),
+            "duration": entry.get("duration") or 0,
+            "thumbnail": thumbnail_url,
+        })
+    return formatted
+
+
 @app.get("/youtube/search")
 async def youtube_search(query: str):
     if not query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
     
-    # ── Strategy 1: YouTube InnerTube API (WEB client with public API key) ──
-    async def innertube_search(q: str) -> list[dict]:
-        # YouTube's publicly-embedded InnerTube API key (not a personal/private key)
-        api_key = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
-        url = f"https://www.youtube.com/youtubei/v1/search?key={api_key}"
-        payload = {
-            "context": {
-                "client": {
-                    "clientName": "WEB",
-                    "clientVersion": "2.20240530.02.00",
-                    "hl": "en",
-                    "gl": "US",
-                }
-            },
-            "query": q,
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Origin": "https://www.youtube.com",
-            "Referer": "https://www.youtube.com/",
-        }
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-
-        # Parse InnerTube response — handle both WEB and mobile response layouts
-        results = []
-        # WEB client uses twoColumnSearchResultsRenderer
-        contents = (
-            data.get("contents", {})
-            .get("twoColumnSearchResultsRenderer", {})
-            .get("primaryContents", {})
-            .get("sectionListRenderer", {})
-            .get("contents", [])
-        )
-        # Fallback: mobile clients use sectionListRenderer directly
-        if not contents:
-            contents = (
-                data.get("contents", {})
-                .get("sectionListRenderer", {})
-                .get("contents", [])
-            )
-        for section in contents:
-            items = section.get("itemSectionRenderer", {}).get("contents", [])
-            for item in items:
-                vr = item.get("videoRenderer") or item.get("compactVideoRenderer")
-                if not vr:
-                    continue
-                vid = vr.get("videoId")
-                title_runs = vr.get("title", {}).get("runs", [])
-                title = title_runs[0].get("text") if title_runs else vr.get("title", {}).get("simpleText", "")
-                # Duration parsing: "3:24" → 204
-                dur_text = vr.get("lengthText", {}).get("simpleText", "")
-                dur_secs = 0
-                if dur_text:
-                    parts = dur_text.split(":")
-                    try:
-                        if len(parts) == 2:
-                            dur_secs = int(parts[0]) * 60 + int(parts[1])
-                        elif len(parts) == 3:
-                            dur_secs = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-                    except ValueError:
-                        dur_secs = 0
-                thumb = None
-                thumbs = vr.get("thumbnail", {}).get("thumbnails", [])
-                if thumbs:
-                    thumb = thumbs[-1].get("url")
-                if vid:
-                    results.append({"id": vid, "title": title, "duration": dur_secs, "thumbnail": thumb})
-                if len(results) >= 5:
-                    break
-            if len(results) >= 5:
-                break
-        return results
-
-    # ── Strategy 2: Dynamic Invidious API Fallback ──
-    async def invidious_search(q: str) -> list[dict]:
-        instances = [
-            "https://invidious.projectsegfau.lt",
-            "https://yewtu.be",
-            "https://vid.puffyan.us",
-            "https://invidious.nerdvpn.de",
-            "https://invidious.privacydev.net",
-        ]
-        # Let's dynamically try fetching healthy instances list from invidious API
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            try:
-                resp = await client.get("https://api.invidious.io/json/v1/instances?sort_by=type,health", headers={"Accept": "application/json"})
-                if resp.status_code == 200:
-                    data = resp.json()
-                    dynamic_instances = []
-                    for item in data:
-                        details = item[1]
-                        if details.get("type") == "https" and details.get("monitor", {}).get("status") == "up":
-                            uri = details.get("uri")
-                            if uri and details.get("api", True):
-                                dynamic_instances.append(uri)
-                    if dynamic_instances:
-                        instances = dynamic_instances[:8] + instances
-            except Exception as e:
-                log.warning("Failed to fetch dynamic Invidious list: %s", e)
-
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            attempts = 0
-            for instance in instances:
-                if attempts >= 2:
-                    break
-                try:
-                    url = f"{instance.rstrip('/')}/api/v1/search"
-                    resp = await client.get(url, params={"q": q, "type": "video"})
-                    resp.raise_for_status()
-                    data = resp.json()
-                    results = []
-                    for item in data:
-                        if not isinstance(item, dict):
-                            continue
-                        video_id = item.get("videoId")
-                        title = item.get("title")
-                        duration = item.get("lengthSeconds", 0)
-                        thumbnails = item.get("videoThumbnails", [])
-                        thumbnail_url = thumbnails[0].get("url") if thumbnails else f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-                        if video_id and title:
-                            results.append({
-                                "id": video_id,
-                                "title": title,
-                                "duration": duration,
-                                "thumbnail": thumbnail_url
-                            })
-                            if len(results) >= 5:
-                                break
-                    if results:
-                        return results
-                except Exception as e:
-                    log.warning("Invidious instance %s failed: %s", instance, e)
-                    attempts += 1
-                    continue
-        raise RuntimeError("All Invidious instances failed")
-
-    # ── Strategy 3: Piped API Fallback ──
-    async def piped_search(q: str) -> list[dict]:
-        instances = [
-            "https://pipedapi.kavin.rocks",
-            "https://pipedapi.adminforge.de",
-            "https://api.piped.yt",
-            "https://pipedapi.in.projectsegfau.lt",
-        ]
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            attempts = 0
-            for base_url in instances:
-                if attempts >= 2:
-                    break
-                try:
-                    resp = await client.get(f"{base_url}/search", params={"q": q, "filter": "videos"})
-                    resp.raise_for_status()
-                    data = resp.json()
-                    items = data.get("items", data) if isinstance(data, dict) else data
-                    results = []
-                    for item in items:
-                        if not isinstance(item, dict):
-                            continue
-                        vid = item.get("url", "").split("v=")[-1] if "v=" in item.get("url", "") else item.get("url", "").lstrip("/watch?v=")
-                        if not vid or vid.startswith("/"):
-                            url_str = item.get("url", "")
-                            if "/watch?v=" in url_str:
-                                vid = url_str.split("/watch?v=")[-1].split("&")[0]
-                            else:
-                                continue
-                        results.append({
-                            "id": vid,
-                            "title": item.get("title", ""),
-                            "duration": item.get("duration", 0),
-                            "thumbnail": item.get("thumbnail", ""),
-                        })
-                        if len(results) >= 5:
-                            break
-                    if results:
-                        return results
-                except Exception as e:
-                    log.warning("Piped instance %s failed: %s", base_url, e)
-                    attempts += 1
-                    continue
-        raise RuntimeError("All Piped instances failed")
-
-    # ── Strategy 4: DuckDuckGo HTML Search Fallback (Extremely robust to cloud blocks) ──
-    async def ddg_search(q: str) -> list[dict]:
-        import urllib.parse
-        url = "https://html.duckduckgo.com/html/"
-        params = {"q": f"{q} site:youtube.com/watch"}
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            resp = await client.get(url, params=params, headers=headers)
-            resp.raise_for_status()
-            html = resp.text
-
-        matches = re.finditer(r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, re.DOTALL)
-        results = []
-        seen_ids = set()
-        for match in matches:
-            href = match.group(1)
-            raw_title = match.group(2)
-            title = re.sub(r'<[^>]+>', '', raw_title).strip()
-            href_decoded = urllib.parse.unquote(href)
-            id_match = re.search(r'watch\?v=([a-zA-Z0-9_-]{11})', href_decoded)
-            if id_match:
-                video_id = id_match.group(1)
-                if video_id not in seen_ids:
-                    seen_ids.add(video_id)
-                    results.append({
-                        "id": video_id,
-                        "title": title,
-                        "duration": 0,
-                        "thumbnail": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-                    })
-                    if len(results) >= 5:
-                        break
-        return results
-
-    # ── Strategy 5: yt-dlp fallback ──
-    async def ytdlp_search(q: str) -> list[dict]:
-        ydl_opts = {
-            'quiet': True,
-            'extract_flat': 'in_playlist',
-            'skip_download': True,
-            'socket_timeout': 5,
-            'retries': 1,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android', 'ios', 'tvhtml5', 'web'],
-                }
-            }
-        }
-        def do_search():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                return ydl.extract_info(f"ytsearch5:{q}", download=False)
-        result = await asyncio.to_thread(do_search)
-        entries = result.get('entries', [])
-        formatted = []
-        for entry in entries:
-            if not entry:
-                continue
-            thumbnail_url = entry.get("thumbnail")
-            if not thumbnail_url and entry.get("thumbnails"):
-                thumbnail_url = entry.get("thumbnails", [{}])[0].get("url")
-            formatted.append({
-                "id": entry.get("id"),
-                "title": entry.get("title"),
-                "duration": entry.get("duration") or 0,
-                "thumbnail": thumbnail_url,
-            })
-        return formatted
-
     # ── Execute fallback chain ──
     strategies = [
         ("InnerTube", innertube_search),
@@ -675,6 +682,53 @@ async def youtube_search(query: str):
 
     log.error("All YouTube search strategies failed for query '%s'", query)
     raise HTTPException(status_code=500, detail=f"YouTube search failed: {str(last_error)}")
+
+
+@app.get("/youtube/search_test")
+async def youtube_search_test(query: str):
+    log_output = []
+    
+    # Strategy 1: InnerTube
+    try:
+        log_output.append("Trying InnerTube...")
+        res = await innertube_search(query)
+        log_output.append(f"InnerTube Success: {len(res)} results")
+    except Exception as e:
+        log_output.append(f"InnerTube Failed: {str(e)}")
+        
+    # Strategy 2: DuckDuckGo
+    try:
+        log_output.append("Trying DuckDuckGo...")
+        res = await ddg_search(query)
+        log_output.append(f"DuckDuckGo Success: {len(res)} results")
+    except Exception as e:
+        log_output.append(f"DuckDuckGo Failed: {str(e)}")
+        
+    # Strategy 3: Invidious
+    try:
+        log_output.append("Trying Invidious...")
+        res = await invidious_search(query)
+        log_output.append(f"Invidious Success: {len(res)} results")
+    except Exception as e:
+        log_output.append(f"Invidious Failed: {str(e)}")
+        
+    # Strategy 4: Piped
+    try:
+        log_output.append("Trying Piped...")
+        res = await piped_search(query)
+        log_output.append(f"Piped Success: {len(res)} results")
+    except Exception as e:
+        log_output.append(f"Piped Failed: {str(e)}")
+
+    # Strategy 5: yt-dlp
+    try:
+        log_output.append("Trying yt-dlp...")
+        res = await ytdlp_search(query)
+        log_output.append(f"yt-dlp Success: {len(res)} results")
+    except Exception as e:
+        log_output.append(f"yt-dlp Failed: {str(e)}")
+
+    return {"logs": log_output}
 
 
 class YouTubeSplitRequest(BaseModel):
