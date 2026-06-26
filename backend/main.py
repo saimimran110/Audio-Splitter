@@ -123,7 +123,6 @@ def run_demucs(input_path: Path, job_id: str) -> None:
         "-o", str(OUTPUT_FOLDER),
         "-n", MODEL,
         "--two-stems=vocals",
-        "--segment", "30",
         "-j", "1",
     ]
     log.info("[job:%s] Running demucs: %s", job_id, " ".join(cmd))
