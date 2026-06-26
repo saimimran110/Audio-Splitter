@@ -665,7 +665,6 @@ async def youtube_search(query: str):
         ("DuckDuckGo", ddg_search),
         ("Invidious", invidious_search),
         ("Piped", piped_search),
-        ("yt-dlp", ytdlp_search),
     ]
     last_error = None
     for name, fn in strategies:
@@ -719,14 +718,6 @@ async def youtube_search_test(query: str):
         log_output.append(f"Piped Success: {len(res)} results")
     except Exception as e:
         log_output.append(f"Piped Failed: {str(e)}")
-
-    # Strategy 5: yt-dlp
-    try:
-        log_output.append("Trying yt-dlp...")
-        res = await ytdlp_search(query)
-        log_output.append(f"yt-dlp Success: {len(res)} results")
-    except Exception as e:
-        log_output.append(f"yt-dlp Failed: {str(e)}")
 
     return {"logs": log_output}
 
