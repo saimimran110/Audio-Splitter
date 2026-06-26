@@ -6,4 +6,6 @@ soundfile==0.14.0
 torch==2.8.0
 torchaudio==2.8.0
 demucs==4.0.1
+yt-dlp
+
 
