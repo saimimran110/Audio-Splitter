@@ -251,7 +251,7 @@ export const ProcessingState = ({ onCancel, isCompleting }: ProcessingStateProps
           fontSize: '11px', color: '#4b5563',
           marginBottom: '32px', flexShrink: 0,
         }}>
-          {Math.round(smoothProgress)}% complete &nbsp;·&nbsp; avg ~3 min, longer songs up to 5 min
+          {Math.round(smoothProgress)}% complete &nbsp;·&nbsp; avg ~2 mins (songs &gt; 5 mins may take 4-5 mins)
         </p>
 
         {/* 7. Rotating music fact */}

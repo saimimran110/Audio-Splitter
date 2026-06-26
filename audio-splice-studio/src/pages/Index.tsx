@@ -544,7 +544,6 @@ const Index = () => {
                             onClick={() => handleYouTubeSplit(video.id, video.title)}
                             className="w-full sm:w-auto px-4 py-2.5 bg-primary/10 hover:bg-primary/20 border border-primary/20 hover:border-primary/40 text-primary-glow font-medium text-xs sm:text-sm rounded-lg transition-all duration-300 flex items-center justify-center gap-2 btn-press whitespace-nowrap"
                           >
-                            <Sparkles className="h-4 w-4" />
                             Separate Vocals & Karaoke
                           </button>
                         </div>
@@ -656,43 +655,64 @@ const Index = () => {
             </div>
           )}
 
-          {/* ════════ FEATURES ════════ */}
-          <div id="features" ref={featureCardsRef} className="grid md:grid-cols-3 gap-6 py-20">
-            <Card className="scroll-reveal bg-background/60 backdrop-blur-sm border-primary/20 hover:border-primary/40 transition-all duration-300 hover:scale-105 hover:shadow-glow" style={{ transitionDelay: '0s' }}>
-              <CardContent className="p-6 text-center">
-                <div className="bg-primary/20 p-3 rounded-lg w-fit mx-auto mb-4">
-                  <Sparkles className="h-6 w-6 text-primary" />
-                </div>
-                <h4 className="font-semibold mb-2">AI-Powered</h4>
-                <p className="text-sm text-muted-foreground">
-                  Advanced machine learning algorithms for high-quality separation
-                </p>
-              </CardContent>
-            </Card>
+          {/* ════════ HOW IT WORKS ════════ */}
+          <div id="features" ref={featureCardsRef} className="py-20 space-y-12">
+            <div className="text-center space-y-3">
+              <h3 className="text-3xl font-bold tracking-tight text-foreground">How It Works</h3>
+              <p className="text-muted-foreground max-w-xl mx-auto text-sm sm:text-base">
+                Extracting high-quality tracks has never been simpler. Follow these 4 easy steps:
+              </p>
+            </div>
 
-            <Card className="scroll-reveal bg-background/60 backdrop-blur-sm border-secondary/20 hover:border-secondary/40 transition-all duration-300 hover:scale-105 hover:shadow-glow-secondary" style={{ transitionDelay: '0.15s' }}>
-              <CardContent className="p-6 text-center">
-                <div className="bg-secondary/20 p-3 rounded-lg w-fit mx-auto mb-4">
-                  <Music2 className="h-6 w-6 text-secondary" />
-                </div>
-                <h4 className="font-semibold mb-2">High Quality</h4>
-                <p className="text-sm text-muted-foreground">
-                  Preserve audio quality while cleanly separating tracks
-                </p>
-              </CardContent>
-            </Card>
+            <div className="grid md:grid-cols-4 gap-6">
+              <Card className="scroll-reveal bg-background/60 backdrop-blur-sm border-primary/20 hover:border-primary/40 transition-all duration-300 hover:scale-105 hover:shadow-glow" style={{ transitionDelay: '0s' }}>
+                <CardContent className="p-6 text-center space-y-4">
+                  <div className="bg-primary/20 p-3 rounded-lg w-fit mx-auto text-primary">
+                    <span className="text-xl font-bold font-mono">01</span>
+                  </div>
+                  <h4 className="font-semibold text-foreground">Choose Input</h4>
+                  <p className="text-xs sm:text-sm text-muted-foreground">
+                    Select <strong>Upload Audio</strong> to browse your own files, or <strong>Search YouTube</strong> to search songs by name.
+                  </p>
+                </CardContent>
+              </Card>
 
-            <Card className="scroll-reveal bg-background/60 backdrop-blur-sm border-accent/20 hover:border-accent/40 transition-all duration-300 hover:scale-105 hover:shadow-glow" style={{ transitionDelay: '0.3s' }}>
-              <CardContent className="p-6 text-center">
-                <div className="bg-accent/20 p-3 rounded-lg w-fit mx-auto mb-4">
-                  <Mic className="h-6 w-6 text-accent" />
-                </div>
-                <h4 className="font-semibold mb-2">Fast Processing</h4>
-                <p className="text-sm text-muted-foreground">
-                  Get your separated tracks in minutes with cloud AI
-                </p>
-              </CardContent>
-            </Card>
+              <Card className="scroll-reveal bg-background/60 backdrop-blur-sm border-secondary/20 hover:border-secondary/40 transition-all duration-300 hover:scale-105 hover:shadow-glow-secondary" style={{ transitionDelay: '0.1s' }}>
+                <CardContent className="p-6 text-center space-y-4">
+                  <div className="bg-secondary/20 p-3 rounded-lg w-fit mx-auto text-secondary">
+                    <span className="text-xl font-bold font-mono">02</span>
+                  </div>
+                  <h4 className="font-semibold text-foreground">Audio Retrieval</h4>
+                  <p className="text-xs sm:text-sm text-muted-foreground">
+                    For YouTube, our backend retrieves the audio stream dynamically. Local files are uploaded securely in seconds.
+                  </p>
+                </CardContent>
+              </Card>
+
+              <Card className="scroll-reveal bg-background/60 backdrop-blur-sm border-accent/20 hover:border-accent/40 transition-all duration-300 hover:scale-105 hover:shadow-glow" style={{ transitionDelay: '0.2s' }}>
+                <CardContent className="p-6 text-center space-y-4">
+                  <div className="bg-accent/20 p-3 rounded-lg w-fit mx-auto text-accent">
+                    <span className="text-xl font-bold font-mono">03</span>
+                  </div>
+                  <h4 className="font-semibold text-foreground">AI Separation</h4>
+                  <p className="text-xs sm:text-sm text-muted-foreground">
+                    Our Hybrid Transformer AI network (HTDemucs) splits the song into two clean, high-fidelity stems: Vocal & Instrumental.
+                  </p>
+                </CardContent>
+              </Card>
+
+              <Card className="scroll-reveal bg-background/60 backdrop-blur-sm border-primary/20 hover:border-primary/40 transition-all duration-300 hover:scale-105 hover:shadow-glow" style={{ transitionDelay: '0.3s' }}>
+                <CardContent className="p-6 text-center space-y-4">
+                  <div className="bg-primary/20 p-3 rounded-lg w-fit mx-auto text-primary">
+                    <span className="text-xl font-bold font-mono">04</span>
+                  </div>
+                  <h4 className="font-semibold text-foreground">Play & Download</h4>
+                  <p className="text-xs sm:text-sm text-muted-foreground">
+                    Listen to separated tracks using the interactive audio player and download them as high-quality MP3s instantly.
+                  </p>
+                </CardContent>
+              </Card>
+            </div>
           </div>
 
           <AdSenseSlot />
