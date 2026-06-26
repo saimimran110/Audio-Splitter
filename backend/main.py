@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import re
+import httpx
 import yt_dlp
 from pydantic import BaseModel
 from fastapi import FastAPI, File, HTTPException, UploadFile, Request, Response, status
@@ -395,47 +396,182 @@ async def get_job(job_id: str):
 async def youtube_search(query: str):
     if not query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
-        
-    # Query YouTube search using Android/iOS/TV Innertube clients (bypasses AWS/Hugging Face 429 blocks)
-    ydl_opts = {
-        'quiet': True,
-        'extract_flat': 'in_playlist',
-        'skip_download': True,
-        'socket_timeout': 8,
-        'retries': 1,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios', 'tvhtml5', 'web'],
+    
+    # ── Strategy 1: YouTube InnerTube API (WEB client with public API key) ──
+    async def innertube_search(q: str) -> list[dict]:
+        # YouTube's publicly-embedded InnerTube API key (not a personal/private key)
+        api_key = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+        url = f"https://www.youtube.com/youtubei/v1/search?key={api_key}"
+        payload = {
+            "context": {
+                "client": {
+                    "clientName": "WEB",
+                    "clientVersion": "2.20240530.02.00",
+                    "hl": "en",
+                    "gl": "US",
+                }
+            },
+            "query": q,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Origin": "https://www.youtube.com",
+            "Referer": "https://www.youtube.com/",
+        }
+        async with httpx.AsyncClient(timeout=12) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+
+        # Parse InnerTube response — handle both WEB and mobile response layouts
+        results = []
+        # WEB client uses twoColumnSearchResultsRenderer
+        contents = (
+            data.get("contents", {})
+            .get("twoColumnSearchResultsRenderer", {})
+            .get("primaryContents", {})
+            .get("sectionListRenderer", {})
+            .get("contents", [])
+        )
+        # Fallback: mobile clients use sectionListRenderer directly
+        if not contents:
+            contents = (
+                data.get("contents", {})
+                .get("sectionListRenderer", {})
+                .get("contents", [])
+            )
+        for section in contents:
+            items = section.get("itemSectionRenderer", {}).get("contents", [])
+            for item in items:
+                vr = item.get("videoRenderer") or item.get("compactVideoRenderer")
+                if not vr:
+                    continue
+                vid = vr.get("videoId")
+                title_runs = vr.get("title", {}).get("runs", [])
+                title = title_runs[0].get("text") if title_runs else vr.get("title", {}).get("simpleText", "")
+                # Duration parsing: "3:24" → 204
+                dur_text = vr.get("lengthText", {}).get("simpleText", "")
+                dur_secs = 0
+                if dur_text:
+                    parts = dur_text.split(":")
+                    try:
+                        if len(parts) == 2:
+                            dur_secs = int(parts[0]) * 60 + int(parts[1])
+                        elif len(parts) == 3:
+                            dur_secs = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                    except ValueError:
+                        dur_secs = 0
+                thumb = None
+                thumbs = vr.get("thumbnail", {}).get("thumbnails", [])
+                if thumbs:
+                    thumb = thumbs[-1].get("url")
+                if vid:
+                    results.append({"id": vid, "title": title, "duration": dur_secs, "thumbnail": thumb})
+                if len(results) >= 5:
+                    break
+            if len(results) >= 5:
+                break
+        return results
+
+    # ── Strategy 2: Piped API (free YouTube proxy, no API key needed) ──
+    PIPED_INSTANCES = [
+        "https://pipedapi.kavin.rocks",
+        "https://pipedapi.adminforge.de",
+        "https://api.piped.yt",
+        "https://pipedapi.in.projectsegfau.lt",
+    ]
+
+    async def piped_search(q: str) -> list[dict]:
+        async with httpx.AsyncClient(timeout=10) as client:
+            for base_url in PIPED_INSTANCES:
+                try:
+                    resp = await client.get(f"{base_url}/search", params={"q": q, "filter": "videos"})
+                    resp.raise_for_status()
+                    data = resp.json()
+                    items = data.get("items", data) if isinstance(data, dict) else data
+                    results = []
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        vid = item.get("url", "").split("v=")[-1] if "v=" in item.get("url", "") else item.get("url", "").lstrip("/watch?v=")
+                        if not vid or vid.startswith("/"):
+                            # Try extracting from /watch?v=ID format
+                            url_str = item.get("url", "")
+                            if "/watch?v=" in url_str:
+                                vid = url_str.split("/watch?v=")[-1].split("&")[0]
+                            else:
+                                continue
+                        results.append({
+                            "id": vid,
+                            "title": item.get("title", ""),
+                            "duration": item.get("duration", 0),
+                            "thumbnail": item.get("thumbnail", ""),
+                        })
+                        if len(results) >= 5:
+                            break
+                    if results:
+                        return results
+                except Exception as e:
+                    log.warning("Piped instance %s failed: %s", base_url, e)
+                    continue
+        raise RuntimeError("All Piped instances failed")
+
+    # ── Strategy 3: yt-dlp fallback (works locally, often blocked on cloud) ──
+    async def ytdlp_search(q: str) -> list[dict]:
+        ydl_opts = {
+            'quiet': True,
+            'extract_flat': 'in_playlist',
+            'skip_download': True,
+            'socket_timeout': 8,
+            'retries': 1,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'ios', 'tvhtml5', 'web'],
+                }
             }
         }
-    }
-    
-    def search():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(f"ytsearch5:{query}", download=False)
-            
-    try:
-        result = await asyncio.to_thread(search)
+        def do_search():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(f"ytsearch5:{q}", download=False)
+        result = await asyncio.to_thread(do_search)
         entries = result.get('entries', [])
-        formatted_results = []
+        formatted = []
         for entry in entries:
             if not entry:
                 continue
-            
             thumbnail_url = entry.get("thumbnail")
             if not thumbnail_url and entry.get("thumbnails"):
                 thumbnail_url = entry.get("thumbnails", [{}])[0].get("url")
-                
-            formatted_results.append({
+            formatted.append({
                 "id": entry.get("id"),
                 "title": entry.get("title"),
                 "duration": entry.get("duration") or 0,
                 "thumbnail": thumbnail_url,
             })
-        return formatted_results
-    except Exception as exc:
-        log.error("YouTube search failed for query '%s': %s", query, exc)
-        raise HTTPException(status_code=500, detail=f"YouTube search failed: {str(exc)}")
+        return formatted
+
+    # ── Execute fallback chain ──
+    strategies = [
+        ("InnerTube", innertube_search),
+        ("Piped", piped_search),
+        ("yt-dlp", ytdlp_search),
+    ]
+    last_error = None
+    for name, fn in strategies:
+        try:
+            log.info("YouTube search [%s]: trying for query '%s'", name, query)
+            results = await fn(query)
+            if results:
+                log.info("YouTube search [%s]: returned %d results", name, len(results))
+                return results
+            log.warning("YouTube search [%s]: returned 0 results, trying next", name)
+        except Exception as exc:
+            log.warning("YouTube search [%s] failed: %s", name, exc)
+            last_error = exc
+
+    log.error("All YouTube search strategies failed for query '%s'", query)
+    raise HTTPException(status_code=500, detail=f"YouTube search failed: {str(last_error)}")
 
 
 class YouTubeSplitRequest(BaseModel):
