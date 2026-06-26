@@ -391,23 +391,101 @@ async def get_job(job_id: str):
     return {"jobId": job_id, **job}
 
 
+def scrape_youtube_search(query: str):
+    import urllib.request
+    import urllib.parse
+    import re
+    import json
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}"
+    req = urllib.request.Request(url, headers=headers)
+    
+    with urllib.request.urlopen(req, timeout=10) as response:
+        html = response.read().decode('utf-8')
+        
+    match = re.search(r'var ytInitialData\s*=\s*({.*?});', html)
+    if not match:
+        match = re.search(r'window\["ytInitialData"\]\s*=\s*({.*?});', html)
+        
+    if not match:
+        raise RuntimeError("Failed to parse YouTube search page HTML")
+        
+    data = json.loads(match.group(1))
+    
+    contents = data['contents']['twoColumnSearchResultsRenderer']['primaryContents']['sectionListRenderer']['contents']
+    item_section = None
+    for c in contents:
+        if 'itemSectionRenderer' in c:
+            item_section = c['itemSectionRenderer']
+            break
+            
+    if not item_section:
+        return []
+        
+    video_entries = []
+    for item in item_section.get('contents', []):
+        if 'videoRenderer' in item:
+            renderer = item['videoRenderer']
+            video_id = renderer.get('videoId')
+            title = renderer.get('title', {}).get('runs', [{}])[0].get('text')
+            
+            # Duration
+            duration_text = renderer.get('lengthText', {}).get('simpleText', '')
+            duration_seconds = 0
+            if duration_text:
+                parts = duration_text.split(':')
+                if len(parts) == 2:
+                    duration_seconds = int(parts[0]) * 60 + int(parts[1])
+                elif len(parts) == 3:
+                    duration_seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                    
+            thumbnails = renderer.get('thumbnail', {}).get('thumbnails', [])
+            thumbnail_url = thumbnails[0].get('url') if thumbnails else None
+            
+            if video_id and title:
+                video_entries.append({
+                    "id": video_id,
+                    "title": title,
+                    "duration": duration_seconds,
+                    "thumbnail": thumbnail_url
+                })
+                if len(video_entries) >= 5:
+                    break
+    return video_entries
+
+
 @app.get("/youtube/search")
 async def youtube_search(query: str):
     if not query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
         
+    try:
+        # Try scraping results page first (much faster and bypasses 429 locks)
+        results = await asyncio.to_thread(scrape_youtube_search, query)
+        if results:
+            return results
+    except Exception as exc:
+        log.warning("Scraper search failed for query '%s', falling back to yt-dlp: %s", query, exc)
+        
+    # Fallback to standard yt-dlp search if scraper fails
     ydl_opts = {
         'quiet': True,
         'extract_flat': 'in_playlist',
         'skip_download': True,
+        'socket_timeout': 10,
+        'retries': 1,
     }
     
-    def search():
+    def search_fallback():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(f"ytsearch5:{query}", download=False)
             
     try:
-        result = await asyncio.to_thread(search)
+        result = await asyncio.to_thread(search_fallback)
         entries = result.get('entries', [])
         formatted_results = []
         for entry in entries:
@@ -421,7 +499,7 @@ async def youtube_search(query: str):
             })
         return formatted_results
     except Exception as exc:
-        log.error("YouTube search failed for query '%s': %s", query, exc)
+        log.error("YouTube search fallback also failed for query '%s': %s", query, exc)
         raise HTTPException(status_code=500, detail=f"YouTube search failed: {str(exc)}")
 
 
