@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Play, Pause, Download, Volume2 } from 'lucide-react';
@@ -12,13 +12,30 @@ interface AudioPlayerProps {
   variant: 'vocals' | 'instrumental';
 }
 
+const BAR_COUNT = 40;
+
 export const AudioPlayer = ({ title, audioUrl, downloadUrl, icon, variant }: AudioPlayerProps) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [audioError, setAudioError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
-  const progressBarRef = useRef<HTMLDivElement>(null);
+  const barsContainerRef = useRef<HTMLDivElement>(null);
+
+  // Generate stable random bar heights
+  const barHeights = useMemo(() =>
+    Array.from({ length: BAR_COUNT }, (_, i) => {
+      // Create a waveform-like shape: louder in middle, quieter at edges
+      const center = BAR_COUNT / 2;
+      const dist = Math.abs(i - center) / center;
+      const base = 20 + (1 - dist * 0.6) * 40;
+      const variation = Math.sin(i * 0.8) * 15 + Math.cos(i * 1.3) * 10;
+      return Math.max(10, Math.min(90, base + variation));
+    }), []);
+
+  // Generate animation speeds for each bar
+  const barSpeeds = useMemo(() =>
+    Array.from({ length: BAR_COUNT }, () => `${0.4 + Math.random() * 0.6}s`), []);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -78,16 +95,17 @@ export const AudioPlayer = ({ title, audioUrl, downloadUrl, icon, variant }: Aud
   };
 
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const progressBarIndex = Math.floor((progress / 100) * BAR_COUNT);
 
-  // Handle seeking by clicking on progress bar
-  const handleProgressBarClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!progressBarRef.current || !audioRef.current || duration === 0) return;
-    
-    const rect = progressBarRef.current.getBoundingClientRect();
+  // Handle seeking by clicking on waveform bars
+  const handleBarsClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!barsContainerRef.current || !audioRef.current || duration === 0) return;
+
+    const rect = barsContainerRef.current.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const clickPercent = Math.min(Math.max(clickX / rect.width, 0), 1);
     const newTime = clickPercent * duration;
-    
+
     audioRef.current.currentTime = newTime;
     setCurrentTime(newTime);
   };
@@ -106,25 +124,50 @@ export const AudioPlayer = ({ title, audioUrl, downloadUrl, icon, variant }: Aud
             {icon}
           </div>
           {title}
+          {isPlaying && (
+            <Volume2 className={cn(
+              "h-4 w-4 ml-auto animate-pulse",
+              variant === 'vocals' ? "text-primary" : "text-secondary"
+            )} />
+          )}
         </CardTitle>
       </CardHeader>
-      
+
       <CardContent className="space-y-4">
         {audioError && (
           <p className="text-xs text-destructive text-center">{audioError}</p>
         )}
-        <div 
-          ref={progressBarRef}
-          className="waveform-visual relative overflow-hidden cursor-pointer h-4 bg-muted rounded-full"
-          onClick={handleProgressBarClick}
+
+        {/* Waveform Bars */}
+        <div
+          ref={barsContainerRef}
+          className="waveform-bars-container"
+          onClick={handleBarsClick}
         >
-          <div 
-            className={cn(
-              "absolute top-0 left-0 h-full transition-all duration-300 rounded-full",
-              variant === 'vocals' ? "bg-primary/60" : "bg-secondary/60"
-            )}
-            style={{ width: `${progress}%` }}
-          />
+          {barHeights.map((height, i) => {
+            const isActive = i <= progressBarIndex;
+            const barMinHeight = Math.max(8, height * 0.3);
+            const barMaxHeight = height;
+
+            return (
+              <div
+                key={i}
+                className={cn(
+                  "waveform-bar-item",
+                  isActive ? "active" : "inactive",
+                  isPlaying ? "playing" : "paused"
+                )}
+                style={{
+                  '--bar-speed': barSpeeds[i],
+                  '--bar-min': `${barMinHeight}%`,
+                  '--bar-max': `${barMaxHeight}%`,
+                  '--bar-base-height': `${height * 0.5}%`,
+                  height: isPlaying ? undefined : `${height * 0.5}%`,
+                  animationDelay: `${i * 0.03}s`,
+                } as React.CSSProperties}
+              />
+            );
+          })}
         </div>
 
         <div className="flex items-center justify-between text-sm text-muted-foreground">
@@ -137,7 +180,7 @@ export const AudioPlayer = ({ title, audioUrl, downloadUrl, icon, variant }: Aud
             variant={variant === 'vocals' ? 'neon' : 'neon-secondary'}
             size="icon"
             onClick={togglePlay}
-            className="flex-shrink-0"
+            className="flex-shrink-0 btn-press"
           >
             {isPlaying ? (
               <Pause className="h-4 w-4" />
@@ -149,7 +192,7 @@ export const AudioPlayer = ({ title, audioUrl, downloadUrl, icon, variant }: Aud
           <Button
             variant="glow"
             onClick={handleDownload}
-            className="flex-1"
+            className="flex-1 btn-shimmer btn-press"
           >
             <Download className="h-4 w-4" />
             Download {title}
@@ -164,7 +207,7 @@ export const AudioPlayer = ({ title, audioUrl, downloadUrl, icon, variant }: Aud
 
 const formatTime = (time: number): string => {
   if (isNaN(time)) return '0:00';
-  
+
   const minutes = Math.floor(time / 60);
   const seconds = Math.floor(time % 60);
   return `${minutes}:${seconds.toString().padStart(2, '0')}`;

@@ -26,7 +26,7 @@ export const AudioUpload = ({ onFileUpload, isProcessing }: AudioUploadProps) =>
   const handleDrop = (e: DragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    
+
     const files = e.dataTransfer.files;
     if (files.length > 0) {
       const file = files[0];
@@ -62,7 +62,7 @@ export const AudioUpload = ({ onFileUpload, isProcessing }: AudioUploadProps) =>
       dragOver && "dragover",
       isProcessing && "pointer-events-none opacity-50"
     )}>
-      <CardContent 
+      <CardContent
         className="p-12 text-center cursor-pointer"
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
@@ -72,11 +72,17 @@ export const AudioUpload = ({ onFileUpload, isProcessing }: AudioUploadProps) =>
         <div className="flex flex-col items-center gap-6">
           <div className="relative">
             <div className="absolute inset-0 animate-glow-pulse rounded-full bg-primary/20"></div>
-            <div className="relative bg-card-elevated p-6 rounded-full border border-primary/30">
-              <Music className="h-12 w-12 text-primary" />
+            <div className={cn(
+              "relative bg-card-elevated p-6 rounded-full border border-primary/30 transition-all duration-300",
+              dragOver && "scale-110 border-primary bg-primary/10"
+            )}>
+              <Music className={cn(
+                "h-12 w-12 text-primary transition-transform duration-300",
+                dragOver && "scale-110 animate-bounce"
+              )} />
             </div>
           </div>
-          
+
           <div className="space-y-2">
             <h3 className="text-2xl font-semibold bg-gradient-primary bg-clip-text text-transparent">
               Upload Your Song
@@ -97,10 +103,10 @@ export const AudioUpload = ({ onFileUpload, isProcessing }: AudioUploadProps) =>
             </div>
           </div>
 
-          <Button 
-            variant="neon" 
-            size="lg" 
-            className="font-semibold"
+          <Button
+            variant="neon"
+            size="lg"
+            className="font-semibold btn-shimmer btn-press"
             disabled={isProcessing}
           >
             <Upload className="h-5 w-5" />
