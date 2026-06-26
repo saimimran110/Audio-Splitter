@@ -502,7 +502,10 @@ async def youtube_search(query: str):
                 log.warning("Failed to fetch dynamic Invidious list: %s", e)
 
         async with httpx.AsyncClient(timeout=4.0) as client:
+            attempts = 0
             for instance in instances:
+                if attempts >= 2:
+                    break
                 try:
                     url = f"{instance.rstrip('/')}/api/v1/search"
                     resp = await client.get(url, params={"q": q, "type": "video"})
@@ -530,6 +533,7 @@ async def youtube_search(query: str):
                         return results
                 except Exception as e:
                     log.warning("Invidious instance %s failed: %s", instance, e)
+                    attempts += 1
                     continue
         raise RuntimeError("All Invidious instances failed")
 
@@ -542,7 +546,10 @@ async def youtube_search(query: str):
             "https://pipedapi.in.projectsegfau.lt",
         ]
         async with httpx.AsyncClient(timeout=3.0) as client:
+            attempts = 0
             for base_url in instances:
+                if attempts >= 2:
+                    break
                 try:
                     resp = await client.get(f"{base_url}/search", params={"q": q, "filter": "videos"})
                     resp.raise_for_status()
@@ -571,6 +578,7 @@ async def youtube_search(query: str):
                         return results
                 except Exception as e:
                     log.warning("Piped instance %s failed: %s", base_url, e)
+                    attempts += 1
                     continue
         raise RuntimeError("All Piped instances failed")
 
@@ -647,9 +655,9 @@ async def youtube_search(query: str):
     # ── Execute fallback chain ──
     strategies = [
         ("InnerTube", innertube_search),
+        ("DuckDuckGo", ddg_search),
         ("Invidious", invidious_search),
         ("Piped", piped_search),
-        ("DuckDuckGo", ddg_search),
         ("yt-dlp", ytdlp_search),
     ]
     last_error = None
