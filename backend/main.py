@@ -26,8 +26,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+import re
+from fastapi import FastAPI, File, HTTPException, UploadFile, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 # ── Logging ────────────────────────────────────────────────────────────────────
@@ -82,8 +84,76 @@ def cleanup_files():
         log.error("Error during cleanup: %s", exc)
 
 
+def get_range_response(file_path: Path, request: Request) -> Response:
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+        
+    file_size = file_path.stat().st_size
+    range_header = request.headers.get("range")
+    
+    # Check for Range header
+    if not range_header:
+        # Standard full response
+        def file_iterator():
+            with open(file_path, "rb") as f:
+                yield from f
+        return StreamingResponse(
+            file_iterator(),
+            headers={"Accept-Ranges": "bytes"},
+            media_type="audio/mpeg"
+        )
+        
+    # Parse range header (e.g. bytes=0-1000)
+    match = re.match(r"bytes=(\d+)-(\d+)?", range_header)
+    if not match:
+        raise HTTPException(status_code=400, detail="Invalid Range Header")
+        
+    start = int(match.group(1))
+    end = match.group(2)
+    end = int(end) if end else file_size - 1
+    
+    if start >= file_size or end >= file_size or start > end:
+        raise HTTPException(
+            status_code=416,
+            detail="Requested range not satisfiable",
+            headers={"Content-Range": f"bytes */{file_size}"}
+        )
+        
+    chunk_size = end - start + 1
+    
+    def file_chunk_iterator():
+        with open(file_path, "rb") as f:
+            f.seek(start)
+            bytes_read = 0
+            while bytes_read < chunk_size:
+                to_read = min(1024 * 64, chunk_size - bytes_read)
+                data = f.read(to_read)
+                if not data:
+                    break
+                yield data
+                bytes_read += len(data)
+                
+    headers = {
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(chunk_size),
+    }
+    
+    return StreamingResponse(
+        file_chunk_iterator(),
+        status_code=206,
+        headers=headers,
+        media_type="audio/mpeg"
+    )
+
+
 atexit.register(cleanup_files)
-app.mount("/files", StaticFiles(directory=str(OUTPUT_FOLDER)), name="files")
+
+
+@app.get("/files/{model_name}/{job_id}/{filename}")
+async def get_audio_file(model_name: str, job_id: str, filename: str, request: Request):
+    file_path = OUTPUT_FOLDER / model_name / job_id / filename
+    return get_range_response(file_path, request)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
