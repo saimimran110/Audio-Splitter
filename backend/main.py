@@ -419,7 +419,7 @@ async def youtube_search(query: str):
             "Origin": "https://www.youtube.com",
             "Referer": "https://www.youtube.com/",
         }
-        async with httpx.AsyncClient(timeout=12) as client:
+        async with httpx.AsyncClient(timeout=3.0) as client:
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
@@ -474,17 +474,75 @@ async def youtube_search(query: str):
                 break
         return results
 
-    # ── Strategy 2: Piped API (free YouTube proxy, no API key needed) ──
-    PIPED_INSTANCES = [
-        "https://pipedapi.kavin.rocks",
-        "https://pipedapi.adminforge.de",
-        "https://api.piped.yt",
-        "https://pipedapi.in.projectsegfau.lt",
-    ]
+    # ── Strategy 2: Dynamic Invidious API Fallback ──
+    async def invidious_search(q: str) -> list[dict]:
+        instances = [
+            "https://invidious.projectsegfau.lt",
+            "https://yewtu.be",
+            "https://vid.puffyan.us",
+            "https://invidious.nerdvpn.de",
+            "https://invidious.privacydev.net",
+        ]
+        # Let's dynamically try fetching healthy instances list from invidious API
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            try:
+                resp = await client.get("https://api.invidious.io/json/v1/instances?sort_by=type,health", headers={"Accept": "application/json"})
+                if resp.status_code == 200:
+                    data = resp.json()
+                    dynamic_instances = []
+                    for item in data:
+                        details = item[1]
+                        if details.get("type") == "https" and details.get("monitor", {}).get("status") == "up":
+                            uri = details.get("uri")
+                            if uri and details.get("api", True):
+                                dynamic_instances.append(uri)
+                    if dynamic_instances:
+                        instances = dynamic_instances[:8] + instances
+            except Exception as e:
+                log.warning("Failed to fetch dynamic Invidious list: %s", e)
 
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            for instance in instances:
+                try:
+                    url = f"{instance.rstrip('/')}/api/v1/search"
+                    resp = await client.get(url, params={"q": q, "type": "video"})
+                    resp.raise_for_status()
+                    data = resp.json()
+                    results = []
+                    for item in data:
+                        if not isinstance(item, dict):
+                            continue
+                        video_id = item.get("videoId")
+                        title = item.get("title")
+                        duration = item.get("lengthSeconds", 0)
+                        thumbnails = item.get("videoThumbnails", [])
+                        thumbnail_url = thumbnails[0].get("url") if thumbnails else f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+                        if video_id and title:
+                            results.append({
+                                "id": video_id,
+                                "title": title,
+                                "duration": duration,
+                                "thumbnail": thumbnail_url
+                            })
+                            if len(results) >= 5:
+                                break
+                    if results:
+                        return results
+                except Exception as e:
+                    log.warning("Invidious instance %s failed: %s", instance, e)
+                    continue
+        raise RuntimeError("All Invidious instances failed")
+
+    # ── Strategy 3: Piped API Fallback ──
     async def piped_search(q: str) -> list[dict]:
-        async with httpx.AsyncClient(timeout=10) as client:
-            for base_url in PIPED_INSTANCES:
+        instances = [
+            "https://pipedapi.kavin.rocks",
+            "https://pipedapi.adminforge.de",
+            "https://api.piped.yt",
+            "https://pipedapi.in.projectsegfau.lt",
+        ]
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            for base_url in instances:
                 try:
                     resp = await client.get(f"{base_url}/search", params={"q": q, "filter": "videos"})
                     resp.raise_for_status()
@@ -496,7 +554,6 @@ async def youtube_search(query: str):
                             continue
                         vid = item.get("url", "").split("v=")[-1] if "v=" in item.get("url", "") else item.get("url", "").lstrip("/watch?v=")
                         if not vid or vid.startswith("/"):
-                            # Try extracting from /watch?v=ID format
                             url_str = item.get("url", "")
                             if "/watch?v=" in url_str:
                                 vid = url_str.split("/watch?v=")[-1].split("&")[0]
@@ -517,13 +574,49 @@ async def youtube_search(query: str):
                     continue
         raise RuntimeError("All Piped instances failed")
 
-    # ── Strategy 3: yt-dlp fallback (works locally, often blocked on cloud) ──
+    # ── Strategy 4: DuckDuckGo HTML Search Fallback (Extremely robust to cloud blocks) ──
+    async def ddg_search(q: str) -> list[dict]:
+        import urllib.parse
+        url = "https://html.duckduckgo.com/html/"
+        params = {"q": f"{q} site:youtube.com/watch"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            resp = await client.get(url, params=params, headers=headers)
+            resp.raise_for_status()
+            html = resp.text
+
+        matches = re.finditer(r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, re.DOTALL)
+        results = []
+        seen_ids = set()
+        for match in matches:
+            href = match.group(1)
+            raw_title = match.group(2)
+            title = re.sub(r'<[^>]+>', '', raw_title).strip()
+            href_decoded = urllib.parse.unquote(href)
+            id_match = re.search(r'watch\?v=([a-zA-Z0-9_-]{11})', href_decoded)
+            if id_match:
+                video_id = id_match.group(1)
+                if video_id not in seen_ids:
+                    seen_ids.add(video_id)
+                    results.append({
+                        "id": video_id,
+                        "title": title,
+                        "duration": 0,
+                        "thumbnail": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+                    })
+                    if len(results) >= 5:
+                        break
+        return results
+
+    # ── Strategy 5: yt-dlp fallback ──
     async def ytdlp_search(q: str) -> list[dict]:
         ydl_opts = {
             'quiet': True,
             'extract_flat': 'in_playlist',
             'skip_download': True,
-            'socket_timeout': 8,
+            'socket_timeout': 5,
             'retries': 1,
             'extractor_args': {
                 'youtube': {
@@ -554,7 +647,9 @@ async def youtube_search(query: str):
     # ── Execute fallback chain ──
     strategies = [
         ("InnerTube", innertube_search),
+        ("Invidious", invidious_search),
         ("Piped", piped_search),
+        ("DuckDuckGo", ddg_search),
         ("yt-dlp", ytdlp_search),
     ]
     last_error = None
