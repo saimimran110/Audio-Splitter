@@ -128,13 +128,18 @@ def run_demucs(input_path: Path, job_id: str) -> None:
     ]
     log.info("[job:%s] Running demucs: %s", job_id, " ".join(cmd))
     t0 = time.time()
-    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    elapsed = time.time() - t0
-    log.info("[job:%s] Demucs finished in %.1fs", job_id, elapsed)
-    if result.stdout:
-        log.debug("[job:%s] stdout: %s", job_id, result.stdout[:500])
-    if result.stderr:
-        log.debug("[job:%s] stderr: %s", job_id, result.stderr[:500])
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        elapsed = time.time() - t0
+        log.info("[job:%s] Demucs finished in %.1fs", job_id, elapsed)
+        if result.stdout:
+            log.debug("[job:%s] stdout: %s", job_id, result.stdout[:500])
+        if result.stderr:
+            log.debug("[job:%s] stderr: %s", job_id, result.stderr[:500])
+    except subprocess.CalledProcessError as exc:
+        err_msg = exc.stderr or exc.stdout or "No stderr output"
+        log.error("[job:%s] Demucs failed: %s", job_id, err_msg)
+        raise RuntimeError(f"Demucs failed: {err_msg.strip()}")
 
 
 async def process_job(job_id: str, input_path: Path) -> None:
