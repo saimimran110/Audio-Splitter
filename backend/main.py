@@ -450,6 +450,103 @@ def extract_youtube_video_id(url: str) -> str:
     return match.group(1)
 
 
+def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
+    """Download audio from YouTube via public Cobalt instances from cobalt.directory."""
+    import urllib.request as _urllib_request
+    import json as _json
+    import shutil as _shutil
+
+    # 1. Fetch working Cobalt API instances from cobalt.directory
+    try:
+        req = _urllib_request.Request(
+            "https://cobalt.directory/api/working?type=api",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with _urllib_request.urlopen(req, timeout=10) as response:
+            data = _json.loads(response.read().decode('utf-8'))
+            # Get list of instances for youtube or youtube-music
+            instances = data.get("youtube", [])
+            # Merge youtube-music instances if any are unique
+            for inst in data.get("youtube-music", []):
+                if inst not in instances:
+                    instances.append(inst)
+    except Exception as e:
+        log.warning("Failed to fetch working Cobalt instances list: %s", e)
+        instances = []
+
+    # Static fallbacks just in case the list is empty or the directory is down
+    static_fallbacks = [
+        "https://api.cobalt.blackcat.sweeux.org",
+        "https://subito-c.meowing.de",
+        "https://rue-cobalt.xenon.zone",
+        "https://dog.kittycat.boo",
+        "https://fox.kittycat.boo"
+    ]
+    for fallback in static_fallbacks:
+        if fallback not in instances:
+            instances.append(fallback)
+
+    success = False
+    last_error = None
+
+    for api_url in instances:
+        log.info("Trying Cobalt instance for audio download: %s", api_url)
+        try:
+            payload = {
+                "url": video_url,
+                "downloadMode": "audio"
+            }
+            req = _urllib_request.Request(
+                api_url,
+                data=_json.dumps(payload).encode('utf-8'),
+                headers={
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'Mozilla/5.0'
+                },
+                method='POST'
+            )
+            with _urllib_request.urlopen(req, timeout=12) as response:
+                res_data = _json.loads(response.read().decode('utf-8'))
+                
+                # If the instance returned an error status in JSON
+                if res_data.get("status") == "error":
+                    err_info = res_data.get("error", {})
+                    raise RuntimeError(f"Cobalt instance error: {err_info.get('code') or res_data.get('text')}")
+                
+                download_url = res_data.get("url")
+                if not download_url:
+                    raise RuntimeError("No download URL returned by instance")
+                
+                log.info("Downloading Cobalt stream: %s", download_url[:120])
+                
+                # Stream the download to local disk
+                download_req = _urllib_request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
+                with _urllib_request.urlopen(download_req, timeout=20) as download_res:
+                    # Verify HTTP response code
+                    if download_res.status != 200:
+                        raise RuntimeError(f"Download stream returned status code {download_res.status}")
+                        
+                    with open(output_path, "wb") as f:
+                        _shutil.copyfileobj(download_res, f)
+                        
+                # Check downloaded file size (minimum 100 KB)
+                if output_path.exists() and output_path.stat().st_size > 100 * 1024:
+                    log.info("Successfully downloaded YouTube audio using Cobalt instance (%s)", api_url)
+                    success = True
+                    break
+                else:
+                    raise RuntimeError("Downloaded file is empty or too small")
+        except Exception as e:
+            log.warning("Cobalt download failed for instance %s: %s", api_url, e)
+            last_error = e
+            if output_path.exists():
+                output_path.unlink()
+
+    if not success:
+        raise RuntimeError(f"All Cobalt download attempts failed. Last error: {last_error}")
+
+
 def download_via_invidious_proxy(video_id: str, output_path: Path) -> None:
     import urllib.request as _urllib_request
     import urllib.parse as _urllib_parse
@@ -550,49 +647,54 @@ def download_via_invidious_proxy(video_id: str, output_path: Path) -> None:
 
 
 async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -> None:
-    """Download YouTube audio using Invidious proxy or local yt-dlp fallback, then run Demucs."""
+    """Download YouTube audio using Cobalt proxy, Invidious proxy, or local yt-dlp fallback, then run Demucs."""
     input_path = PROJECT_ROOT / f"{job_id}.mp3"
     try:
         JOB_STATUS[job_id]["status"] = "processing"
         JOB_STATUS[job_id]["message"] = "Downloading audio from YouTube..."
 
-        # 1. Extract video ID
-        video_id = extract_youtube_video_id(youtube_url)
-
-        # 2. Try Invidious Proxy Download
+        # 1. Try Cobalt API proxy downloader first (best quality, high stability)
         try:
-            log.info("[job:%s] Attempting Invidious proxy download for video: %s", job_id, video_id)
-            await asyncio.to_thread(download_via_invidious_proxy, video_id, input_path)
-        except Exception as inv_err:
-            log.warning("[job:%s] Invidious proxy download failed: %s. Falling back to yt-dlp...", job_id, inv_err)
+            log.info("[job:%s] Attempting Cobalt proxy download for URL: %s", job_id, youtube_url)
+            await asyncio.to_thread(download_via_cobalt_proxy, youtube_url, input_path)
+        except Exception as cob_err:
+            log.warning("[job:%s] Cobalt proxy download failed: %s. Trying Invidious proxy...", job_id, cob_err)
             
-            # 3. Fallback: yt-dlp
-            output_template = str(PROJECT_ROOT / f"{job_id}.%(ext)s")
-            cmd = [
-                "yt-dlp",
-                "--no-playlist",
-                "-x",                          # extract audio
-                "--audio-format", "mp3",
-                "--audio-quality", "0",
-                "-o", output_template,
-                youtube_url,
-            ]
-            log.info("[job:%s] Running yt-dlp fallback: %s", job_id, " ".join(cmd))
-            result = await asyncio.to_thread(
-                subprocess.run, cmd, check=True, capture_output=True, text=True
-            )
-            log.info("[job:%s] yt-dlp output: %s", job_id, result.stdout[:200])
+            # 2. Extract video ID and try Invidious proxy downloader second
+            try:
+                video_id = extract_youtube_video_id(youtube_url)
+                log.info("[job:%s] Attempting Invidious proxy download for video: %s", job_id, video_id)
+                await asyncio.to_thread(download_via_invidious_proxy, video_id, input_path)
+            except Exception as inv_err:
+                log.warning("[job:%s] Invidious proxy download failed: %s. Falling back to yt-dlp...", job_id, inv_err)
+                
+                # 3. Fallback: yt-dlp
+                output_template = str(PROJECT_ROOT / f"{job_id}.%(ext)s")
+                cmd = [
+                    "yt-dlp",
+                    "--no-playlist",
+                    "-x",                          # extract audio
+                    "--audio-format", "mp3",
+                    "--audio-quality", "0",
+                    "-o", output_template,
+                    youtube_url,
+                ]
+                log.info("[job:%s] Running yt-dlp fallback: %s", job_id, " ".join(cmd))
+                result = await asyncio.to_thread(
+                    subprocess.run, cmd, check=True, capture_output=True, text=True
+                )
+                log.info("[job:%s] yt-dlp output: %s", job_id, result.stdout[:200])
 
-            # Resolve the downloaded file path
-            files = list(PROJECT_ROOT.glob(f"{job_id}.*"))
-            if not files:
-                raise RuntimeError("yt-dlp fallback finished but file not found on disk")
-            
-            # If it's not .mp3, rename it to .mp3 so demucs can process it easily
-            if files[0].suffix.lower() != ".mp3":
-                files[0].rename(input_path)
-            else:
-                input_path = files[0]
+                # Resolve the downloaded file path
+                files = list(PROJECT_ROOT.glob(f"{job_id}.*"))
+                if not files:
+                    raise RuntimeError("yt-dlp fallback finished but file not found on disk")
+                
+                # If it's not .mp3, rename it to .mp3 so demucs can process it easily
+                if files[0].suffix.lower() != ".mp3":
+                    files[0].rename(input_path)
+                else:
+                    input_path = files[0]
 
         log.info("[job:%s] Download complete. File: %s (%.2f MB)", job_id, input_path.name, input_path.stat().st_size / 1024 / 1024)
 
@@ -608,6 +710,7 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
         })
         if input_path and input_path.exists():
             input_path.unlink()
+
 
 
 
