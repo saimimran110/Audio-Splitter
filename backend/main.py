@@ -441,63 +441,174 @@ async def youtube_split(request: Request):
     return {"jobId": job_id, "status": "queued"}
 
 
+def extract_youtube_video_id(url: str) -> str:
+    import re as _re
+    pattern = r'(?:v=|\/v\/|embed\/|youtu\.be\/|\/v=|^)([a-zA-Z0-9_-]{11})'
+    match = _re.search(pattern, url)
+    if not match:
+        raise ValueError(f"Could not extract video ID from URL: {url}")
+    return match.group(1)
+
+
+def download_via_invidious_proxy(video_id: str, output_path: Path) -> None:
+    import urllib.request as _urllib_request
+    import urllib.parse as _urllib_parse
+    import json as _json
+    import shutil as _shutil
+
+    # 1. Fetch active Invidious instances
+    try:
+        req = _urllib_request.Request("https://api.invidious.io/instances.json", headers={"User-Agent": "Mozilla/5.0"})
+        with _urllib_request.urlopen(req, timeout=10) as response:
+            instances_data = _json.loads(response.read().decode('utf-8'))
+            
+            instances = []
+            for item in instances_data:
+                if isinstance(item, list) and len(item) == 2:
+                    name, info = item
+                    if info.get('api') is True:
+                        uri = info.get('uri')
+                        if uri:
+                            uptime = info.get('monitor', {}).get('uptime', 0) if info.get('monitor') else 0
+                            instances.append((uri.rstrip('/'), uptime))
+            
+            instances.sort(key=lambda x: x[1], reverse=True)
+            instance_urls = [inst for inst, upt in instances]
+    except Exception as e:
+        log.warning("Failed to fetch Invidious instances list: %s", e)
+        instance_urls = []
+
+    # Static fallbacks in case dynamic list is empty or API is blocked
+    static_fallbacks = [
+        "https://iv.melmac.space",
+        "https://invidious.flokinet.to",
+        "https://invidious.projectsegfau.lt",
+        "https://yewtu.be",
+        "https://invidious.privacydev.net",
+    ]
+    for fallback in static_fallbacks:
+        if fallback not in instance_urls:
+            instance_urls.append(fallback)
+
+    # Try downloading from top instances
+    success = False
+    last_error = None
+    
+    for instance in instance_urls[:15]:
+        url = f"{instance}/api/v1/videos/{video_id}"
+        log.info("Trying Invidious API instance: %s", url)
+        try:
+            req = _urllib_request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with _urllib_request.urlopen(req, timeout=8) as response:
+                data = _json.loads(response.read().decode('utf-8'))
+                
+                # Try adaptive formats (usually contains audio only streams)
+                adaptive_formats = data.get('adaptiveFormats', [])
+                audio_formats = [f for f in adaptive_formats if 'audio/' in f.get('type', '')]
+                
+                if not audio_formats:
+                    # Fallback to general formats
+                    audio_formats = [f for f in data.get('formatStreams', []) if 'audio/' in f.get('type', '')]
+                
+                if audio_formats:
+                    # Sort by bitrate descending to get best quality audio
+                    audio_formats.sort(key=lambda x: int(x.get('bitrate') or 0), reverse=True)
+                    stream_url = audio_formats[0].get('url')
+                    if stream_url.startswith('/'):
+                        stream_url = f"{instance}{stream_url}"
+                    
+                    # Force Invidious instance to rewrite and proxy playback through their server (local=true)
+                    if "local=true" not in stream_url:
+                        if "?" in stream_url:
+                            stream_url += "&local=true"
+                        else:
+                            stream_url += "?local=true"
+                    
+                    log.info("Downloading stream via proxy URL: %s", stream_url[:120])
+                    
+                    # Stream the download to local disk
+                    download_req = _urllib_request.Request(stream_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with _urllib_request.urlopen(download_req, timeout=20) as download_res:
+                        with open(output_path, "wb") as f:
+                            _shutil.copyfileobj(download_res, f)
+                            
+                    # Check downloaded file size (minimum 100 KB)
+                    if output_path.exists() and output_path.stat().st_size > 100 * 1024:
+                        log.info("Successfully downloaded YouTube audio using Invidious proxy (%s)", instance)
+                        success = True
+                        break
+                    else:
+                        raise RuntimeError("Downloaded file is empty or too small")
+        except Exception as e:
+            log.warning("Invidious proxy download failed for instance %s: %s", instance, e)
+            last_error = e
+            if output_path.exists():
+                output_path.unlink()
+
+    if not success:
+        raise RuntimeError(f"All Invidious proxy download attempts failed. Last error: {last_error}")
+
+
 async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -> None:
-    """Download YouTube audio with yt-dlp then run through the same Demucs pipeline."""
-    input_path = None
+    """Download YouTube audio using Invidious proxy or local yt-dlp fallback, then run Demucs."""
+    input_path = PROJECT_ROOT / f"{job_id}.mp3"
     try:
         JOB_STATUS[job_id]["status"] = "processing"
-        JOB_STATUS[job_id]["message"] = "Downloading audio from YouTube (this may take a moment)..."
+        JOB_STATUS[job_id]["message"] = "Downloading audio from YouTube..."
 
-        # Use yt-dlp to download audio as mp3
-        output_template = str(PROJECT_ROOT / f"{job_id}.%(ext)s")
-        cmd = [
-            "yt-dlp",
-            "--no-playlist",
-            "-x",                          # extract audio
-            "--audio-format", "mp3",
-            "--audio-quality", "0",
-            "-o", output_template,
-            youtube_url,
-        ]
-        log.info("[job:%s] Downloading YouTube audio: %s", job_id, youtube_url)
-        result = await asyncio.to_thread(
-            subprocess.run, cmd, check=True, capture_output=True, text=True
-        )
-        log.info("[job:%s] yt-dlp stdout: %s", job_id, result.stdout[:300])
+        # 1. Extract video ID
+        video_id = extract_youtube_video_id(youtube_url)
 
-        # Find the downloaded file
-        input_path = PROJECT_ROOT / f"{job_id}.mp3"
-        if not input_path.exists():
-            # yt-dlp might have used a different extension before converting
-            candidates = list(PROJECT_ROOT.glob(f"{job_id}.*"))
-            if not candidates:
-                raise RuntimeError("yt-dlp finished but output file not found")
-            input_path = candidates[0]
+        # 2. Try Invidious Proxy Download
+        try:
+            log.info("[job:%s] Attempting Invidious proxy download for video: %s", job_id, video_id)
+            await asyncio.to_thread(download_via_invidious_proxy, video_id, input_path)
+        except Exception as inv_err:
+            log.warning("[job:%s] Invidious proxy download failed: %s. Falling back to yt-dlp...", job_id, inv_err)
+            
+            # 3. Fallback: yt-dlp
+            output_template = str(PROJECT_ROOT / f"{job_id}.%(ext)s")
+            cmd = [
+                "yt-dlp",
+                "--no-playlist",
+                "-x",                          # extract audio
+                "--audio-format", "mp3",
+                "--audio-quality", "0",
+                "-o", output_template,
+                youtube_url,
+            ]
+            log.info("[job:%s] Running yt-dlp fallback: %s", job_id, " ".join(cmd))
+            result = await asyncio.to_thread(
+                subprocess.run, cmd, check=True, capture_output=True, text=True
+            )
+            log.info("[job:%s] yt-dlp output: %s", job_id, result.stdout[:200])
 
-        log.info("[job:%s] Downloaded to %s (%.2f MB)", job_id, input_path.name, input_path.stat().st_size / 1024 / 1024)
+            # Resolve the downloaded file path
+            files = list(PROJECT_ROOT.glob(f"{job_id}.*"))
+            if not files:
+                raise RuntimeError("yt-dlp fallback finished but file not found on disk")
+            
+            # If it's not .mp3, rename it to .mp3 so demucs can process it easily
+            if files[0].suffix.lower() != ".mp3":
+                files[0].rename(input_path)
+            else:
+                input_path = files[0]
 
-        # Now reuse the same process_job logic
+        log.info("[job:%s] Download complete. File: %s (%.2f MB)", job_id, input_path.name, input_path.stat().st_size / 1024 / 1024)
+
+        # 4. Delegate to process_job for Demucs splitting
         await process_job(job_id, input_path)
 
-    except subprocess.CalledProcessError as exc:
-        err_msg = exc.stderr or exc.stdout or "yt-dlp failed with no output"
-        log.error("[job:%s] yt-dlp failed: %s", job_id, err_msg)
-        JOB_STATUS[job_id].update({
-            "status": "failed",
-            "message": f"YouTube download failed: {err_msg[:300]}",
-            "finishedAt": time.time(),
-        })
-        if input_path and input_path.exists():
-            input_path.unlink()
     except Exception as exc:
         log.error("[job:%s] YouTube job failed: %s", job_id, exc, exc_info=True)
         JOB_STATUS[job_id].update({
             "status": "failed",
-            "message": str(exc),
+            "message": f"YouTube download/process failed: {str(exc)[:200]}",
             "finishedAt": time.time(),
         })
         if input_path and input_path.exists():
             input_path.unlink()
+
 
 
 if FRONTEND_DIST.exists():
