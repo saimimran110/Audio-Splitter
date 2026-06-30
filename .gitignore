@@ -15,3 +15,6 @@ audio-splice-studio/dist/
 backend/__pycache__/
 __pycache__/
 *.png
+.agents/
+*.zip
+*.mjs

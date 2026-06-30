@@ -1,4 +1,3 @@
-
 import os
 # Set thread limits depending on environment BEFORE importing torch/demucs
 if os.path.exists("/app"):
@@ -27,9 +26,6 @@ from pathlib import Path
 from typing import Any
 
 import re
-import httpx
-import yt_dlp
-from pydantic import BaseModel
 from fastapi import FastAPI, File, HTTPException, UploadFile, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -284,57 +280,6 @@ async def process_job(job_id: str, input_path: Path) -> None:
             input_path.unlink()
 
 
-async def process_youtube_job(job_id: str, video_id: str) -> None:
-    """Background task: download audio from YouTube, then split."""
-    input_path = None
-    try:
-        log.info("[job:%s] Starting YouTube audio download for video_id: %s", job_id, video_id)
-        if job_id not in JOB_STATUS:
-            JOB_STATUS[job_id] = {"createdAt": time.time()}
-        JOB_STATUS[job_id].update({
-            "status": "processing",
-            "message": "Downloading audio from YouTube...",
-        })
-
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        out_tmpl = str(PROJECT_ROOT / f"{job_id}.%(ext)s")
-        
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': out_tmpl,
-            'quiet': True,
-        }
-
-        def download():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([video_url])
-
-        await asyncio.to_thread(download)
-
-        # Resolve the downloaded file path
-        files = list(PROJECT_ROOT.glob(f"{job_id}.*"))
-        if not files:
-            raise RuntimeError("YouTube audio download failed — file not found on disk")
-        
-        input_path = files[0]
-        log.info("[job:%s] YouTube download complete. File: %s", job_id, input_path.name)
-
-        # Delegate the rest to the standard process_job function
-        await process_job(job_id, input_path)
-
-    except Exception as exc:
-        log.error("[job:%s] YouTube download/process failed: %s", job_id, exc, exc_info=True)
-        if job_id not in JOB_STATUS:
-            JOB_STATUS[job_id] = {"createdAt": time.time()}
-        JOB_STATUS[job_id].update({
-            "status": "failed",
-            "message": str(exc),
-            "finishedAt": time.time(),
-        })
-        if input_path and input_path.exists():
-            input_path.unlink()
-
-
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health_check():
@@ -392,364 +337,168 @@ async def get_job(job_id: str):
     return {"jobId": job_id, **job}
 
 
-# ── YouTube Search Strategies (Module Level) ──
-
-# ── Strategy 1: YouTube InnerTube API (WEB client with public API key) ──
-async def innertube_search(q: str) -> list[dict]:
-    # YouTube's publicly-embedded InnerTube API key (not a personal/private key)
-    api_key = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
-    url = f"https://www.youtube.com/youtubei/v1/search?key={api_key}"
-    payload = {
-        "context": {
-            "client": {
-                "clientName": "WEB",
-                "clientVersion": "2.20240530.02.00",
-                "hl": "en",
-                "gl": "US",
-            }
-        },
-        "query": q,
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Origin": "https://www.youtube.com",
-        "Referer": "https://www.youtube.com/",
-    }
-    async with httpx.AsyncClient(timeout=3.0) as client:
-        resp = await client.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-
-    # Parse InnerTube response — handle both WEB and mobile response layouts
-    results = []
-    # WEB client uses twoColumnSearchResultsRenderer
-    contents = (
-        data.get("contents", {})
-        .get("twoColumnSearchResultsRenderer", {})
-        .get("primaryContents", {})
-        .get("sectionListRenderer", {})
-        .get("contents", [])
-    )
-    # Fallback: mobile clients use sectionListRenderer directly
-    if not contents:
-        contents = (
-            data.get("contents", {})
-            .get("sectionListRenderer", {})
-            .get("contents", [])
-        )
-    for section in contents:
-        items = section.get("itemSectionRenderer", {}).get("contents", [])
-        for item in items:
-            vr = item.get("videoRenderer") or item.get("compactVideoRenderer")
-            if not vr:
-                continue
-            vid = vr.get("videoId")
-            title_runs = vr.get("title", {}).get("runs", [])
-            title = title_runs[0].get("text") if title_runs else vr.get("title", {}).get("simpleText", "")
-            # Duration parsing: "3:24" → 204
-            dur_text = vr.get("lengthText", {}).get("simpleText", "")
-            dur_secs = 0
-            if dur_text:
-                parts = dur_text.split(":")
-                try:
-                    if len(parts) == 2:
-                        dur_secs = int(parts[0]) * 60 + int(parts[1])
-                    elif len(parts) == 3:
-                        dur_secs = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-                except ValueError:
-                    dur_secs = 0
-            thumb = None
-            thumbs = vr.get("thumbnail", {}).get("thumbnails", [])
-            if thumbs:
-                thumb = thumbs[-1].get("url")
-            if vid:
-                results.append({"id": vid, "title": title, "duration": dur_secs, "thumbnail": thumb})
-            if len(results) >= 5:
-                break
-        if len(results) >= 5:
-            break
-    return results
-
-
-# ── Strategy 2: Dynamic Invidious API Fallback ──
-async def invidious_search(q: str) -> list[dict]:
-    instances = [
-        "https://invidious.projectsegfau.lt",
-        "https://yewtu.be",
-        "https://vid.puffyan.us",
-        "https://invidious.nerdvpn.de",
-        "https://invidious.privacydev.net",
-    ]
-    # Let's dynamically try fetching healthy instances list from invidious API
-    async with httpx.AsyncClient(timeout=3.0) as client:
-        try:
-            resp = await client.get("https://api.invidious.io/json/v1/instances?sort_by=type,health", headers={"Accept": "application/json"})
-            if resp.status_code == 200:
-                data = resp.json()
-                dynamic_instances = []
-                for item in data:
-                    details = item[1]
-                    if details.get("type") == "https" and details.get("monitor", {}).get("status") == "up":
-                        uri = details.get("uri")
-                        if uri and details.get("api", True):
-                            dynamic_instances.append(uri)
-                if dynamic_instances:
-                    instances = dynamic_instances[:8] + instances
-        except Exception as e:
-            log.warning("Failed to fetch dynamic Invidious list: %s", e)
-
-    async with httpx.AsyncClient(timeout=4.0) as client:
-        attempts = 0
-        for instance in instances:
-            if attempts >= 2:
-                break
-            try:
-                url = f"{instance.rstrip('/')}/api/v1/search"
-                resp = await client.get(url, params={"q": q, "type": "video"})
-                resp.raise_for_status()
-                data = resp.json()
-                results = []
-                for item in data:
-                    if not isinstance(item, dict):
-                        continue
-                    video_id = item.get("videoId")
-                    title = item.get("title")
-                    duration = item.get("lengthSeconds", 0)
-                    thumbnails = item.get("videoThumbnails", [])
-                    thumbnail_url = thumbnails[0].get("url") if thumbnails else f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-                    if video_id and title:
-                        results.append({
-                            "id": video_id,
-                            "title": title,
-                            "duration": duration,
-                            "thumbnail": thumbnail_url
-                        })
-                        if len(results) >= 5:
-                            break
-                if results:
-                    return results
-            except Exception as e:
-                log.warning("Invidious instance %s failed: %s", instance, e)
-                attempts += 1
-                continue
-    raise RuntimeError("All Invidious instances failed")
-
-
-# ── Strategy 3: Piped API Fallback ──
-async def piped_search(q: str) -> list[dict]:
-    instances = [
-        "https://pipedapi.kavin.rocks",
-        "https://pipedapi.adminforge.de",
-        "https://api.piped.yt",
-        "https://pipedapi.in.projectsegfau.lt",
-    ]
-    async with httpx.AsyncClient(timeout=3.0) as client:
-        attempts = 0
-        for base_url in instances:
-            if attempts >= 2:
-                break
-            try:
-                resp = await client.get(f"{base_url}/search", params={"q": q, "filter": "videos"})
-                resp.raise_for_status()
-                data = resp.json()
-                items = data.get("items", data) if isinstance(data, dict) else data
-                results = []
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    vid = item.get("url", "").split("v=")[-1] if "v=" in item.get("url", "") else item.get("url", "").lstrip("/watch?v=")
-                    if not vid or vid.startswith("/"):
-                        url_str = item.get("url", "")
-                        if "/watch?v=" in url_str:
-                            vid = url_str.split("/watch?v=")[-1].split("&")[0]
-                        else:
-                            continue
-                    results.append({
-                        "id": vid,
-                        "title": item.get("title", ""),
-                        "duration": item.get("duration", 0),
-                        "thumbnail": item.get("thumbnail", ""),
-                    })
-                    if len(results) >= 5:
-                        break
-                if results:
-                    return results
-            except Exception as e:
-                log.warning("Piped instance %s failed: %s", base_url, e)
-                attempts += 1
-                continue
-    raise RuntimeError("All Piped instances failed")
-
-
-# ── Strategy 4: DuckDuckGo HTML Search Fallback (Extremely robust to cloud blocks) ──
-async def ddg_search(q: str) -> list[dict]:
-    import urllib.parse
-    url = "https://html.duckduckgo.com/html/"
-    params = {"q": f"{q} site:youtube.com/watch"}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    async with httpx.AsyncClient(timeout=4.0) as client:
-        resp = await client.get(url, params=params, headers=headers)
-        resp.raise_for_status()
-        html = resp.text
-
-    matches = re.finditer(r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html, re.DOTALL)
-    results = []
-    seen_ids = set()
-    for match in matches:
-        href = match.group(1)
-        raw_title = match.group(2)
-        title = re.sub(r'<[^>]+>', '', raw_title).strip()
-        href_decoded = urllib.parse.unquote(href)
-        id_match = re.search(r'watch\?v=([a-zA-Z0-9_-]{11})', href_decoded)
-        if id_match:
-            video_id = id_match.group(1)
-            if video_id not in seen_ids:
-                seen_ids.add(video_id)
-                results.append({
-                    "id": video_id,
-                    "title": title,
-                    "duration": 0,
-                    "thumbnail": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-                })
-                if len(results) >= 5:
-                    break
-    return results
-
-
-# ── Strategy 5: yt-dlp fallback ──
-async def ytdlp_search(q: str) -> list[dict]:
-    ydl_opts = {
-        'quiet': True,
-        'extract_flat': 'in_playlist',
-        'skip_download': True,
-        'socket_timeout': 5,
-        'retries': 1,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios', 'tvhtml5', 'web'],
-            }
-        }
-    }
-    def do_search():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(f"ytsearch5:{q}", download=False)
-    result = await asyncio.to_thread(do_search)
-    entries = result.get('entries', [])
-    formatted = []
-    for entry in entries:
-        if not entry:
-            continue
-        thumbnail_url = entry.get("thumbnail")
-        if not thumbnail_url and entry.get("thumbnails"):
-            thumbnail_url = entry.get("thumbnails", [{}])[0].get("url")
-        formatted.append({
-            "id": entry.get("id"),
-            "title": entry.get("title"),
-            "duration": entry.get("duration") or 0,
-            "thumbnail": thumbnail_url,
-        })
-    return formatted
-
-
-@app.get("/youtube/search")
-async def youtube_search(query: str):
-    if not query.strip():
-        raise HTTPException(status_code=400, detail="Query cannot be empty")
-    
-    # ── Execute fallback chain ──
-    strategies = [
-        ("InnerTube", innertube_search),
-        ("DuckDuckGo", ddg_search),
-        ("Invidious", invidious_search),
-        ("Piped", piped_search),
-    ]
-    last_error = None
-    for name, fn in strategies:
-        try:
-            log.info("YouTube search [%s]: trying for query '%s'", name, query)
-            results = await fn(query)
-            if results:
-                log.info("YouTube search [%s]: returned %d results", name, len(results))
-                return results
-            log.warning("YouTube search [%s]: returned 0 results, trying next", name)
-        except Exception as exc:
-            log.warning("YouTube search [%s] failed: %s", name, exc)
-            last_error = exc
-
-    log.error("All YouTube search strategies failed for query '%s'", query)
-    raise HTTPException(status_code=500, detail=f"YouTube search failed: {str(last_error)}")
-
-
-@app.get("/youtube/search_test")
-async def youtube_search_test(query: str):
-    log_output = []
-    
-    # Strategy 1: InnerTube
-    try:
-        log_output.append("Trying InnerTube...")
-        res = await innertube_search(query)
-        log_output.append(f"InnerTube Success: {len(res)} results")
-    except Exception as e:
-        log_output.append(f"InnerTube Failed: {str(e)}")
-        
-    # Strategy 2: DuckDuckGo
-    try:
-        log_output.append("Trying DuckDuckGo...")
-        res = await ddg_search(query)
-        log_output.append(f"DuckDuckGo Success: {len(res)} results")
-    except Exception as e:
-        log_output.append(f"DuckDuckGo Failed: {str(e)}")
-        
-    # Strategy 3: Invidious
-    try:
-        log_output.append("Trying Invidious...")
-        res = await invidious_search(query)
-        log_output.append(f"Invidious Success: {len(res)} results")
-    except Exception as e:
-        log_output.append(f"Invidious Failed: {str(e)}")
-        
-    # Strategy 4: Piped
-    try:
-        log_output.append("Trying Piped...")
-        res = await piped_search(query)
-        log_output.append(f"Piped Success: {len(res)} results")
-    except Exception as e:
-        log_output.append(f"Piped Failed: {str(e)}")
-
-    return {"logs": log_output}
-
-
-class YouTubeSplitRequest(BaseModel):
-    videoId: str
-
-
-@app.post("/youtube/split")
-async def youtube_split(req: YouTubeSplitRequest):
-    if not req.videoId.strip():
-        raise HTTPException(status_code=400, detail="videoId is required")
-        
-    job_id = uuid.uuid4().hex
-    
-    JOB_STATUS[job_id] = {
-        "status": "queued",
-        "message": "Job queued, downloading YouTube audio soon...",
-        "createdAt": time.time(),
-    }
-    
-    # Fire and forget
-    asyncio.create_task(process_youtube_job(job_id, req.videoId))
-    
-    return {"jobId": job_id, "status": "queued"}
-
-
 @app.post("/cleanup")
 async def manual_cleanup():
     cleanup_files()
     return {"message": "Cleanup completed"}
+# ── YouTube Feature ────────────────────────────────────────────────────────────
+import httpx
+
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "AIzaSyDpSx9c1thanBoyHW8CCex1E5ai2Mmy7yg")
+YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
+YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
+
+
+@app.get("/youtube/search")
+async def youtube_search(q: str, maxResults: int = 8):
+    """Search YouTube for songs and return results with thumbnails and metadata."""
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="Query is required")
+
+    params = {
+        "part": "snippet",
+        "q": q,
+        "type": "video",
+        "videoCategoryId": "10",  # Music category
+        "maxResults": maxResults,
+        "key": YOUTUBE_API_KEY,
+    }
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(YOUTUBE_SEARCH_URL, params=params)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"YouTube API error: {resp.text[:200]}")
+        data = resp.json()
+
+    # Also fetch video durations
+    video_ids = [item["id"]["videoId"] for item in data.get("items", []) if item.get("id", {}).get("videoId")]
+    durations = {}
+    if video_ids:
+        vid_params = {
+            "part": "contentDetails",
+            "id": ",".join(video_ids),
+            "key": YOUTUBE_API_KEY,
+        }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            vresp = await client.get(YOUTUBE_VIDEOS_URL, params=vid_params)
+            if vresp.status_code == 200:
+                vdata = vresp.json()
+                for item in vdata.get("items", []):
+                    vid_id = item["id"]
+                    duration_iso = item["contentDetails"]["duration"]
+                    # Parse ISO 8601 duration e.g. PT3M45S
+                    import re as _re
+                    m = _re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", duration_iso)
+                    if m:
+                        h, mi, s = (int(x or 0) for x in m.groups())
+                        total_sec = h * 3600 + mi * 60 + s
+                        durations[vid_id] = total_sec
+
+    results = []
+    for item in data.get("items", []):
+        vid_id = item.get("id", {}).get("videoId")
+        if not vid_id:
+            continue
+        snippet = item.get("snippet", {})
+        duration_sec = durations.get(vid_id, 0)
+        results.append({
+            "videoId": vid_id,
+            "title": snippet.get("title", ""),
+            "channelTitle": snippet.get("channelTitle", ""),
+            "thumbnail": snippet.get("thumbnails", {}).get("medium", {}).get("url", ""),
+            "durationSec": duration_sec,
+            "url": f"https://www.youtube.com/watch?v={vid_id}",
+        })
+
+    return {"results": results}
+
+
+@app.post("/youtube/split")
+async def youtube_split(request: Request):
+    """Download audio from a YouTube video URL and run stem separation on it."""
+    body = await request.json()
+    youtube_url = body.get("url", "").strip()
+    video_title = body.get("title", "youtube_audio").strip()
+
+    if not youtube_url:
+        raise HTTPException(status_code=400, detail="YouTube URL is required")
+
+    # Validate it looks like a YouTube URL
+    if "youtube.com/watch" not in youtube_url and "youtu.be/" not in youtube_url:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+
+    job_id = uuid.uuid4().hex
+
+    JOB_STATUS[job_id] = {
+        "status": "queued",
+        "message": "Downloading audio from YouTube...",
+        "createdAt": time.time(),
+    }
+
+    # Fire and forget
+    asyncio.create_task(process_youtube_job(job_id, youtube_url, video_title))
+
+    return {"jobId": job_id, "status": "queued"}
+
+
+async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -> None:
+    """Download YouTube audio with yt-dlp then run through the same Demucs pipeline."""
+    input_path = None
+    try:
+        JOB_STATUS[job_id]["status"] = "processing"
+        JOB_STATUS[job_id]["message"] = "Downloading audio from YouTube (this may take a moment)..."
+
+        # Use yt-dlp to download audio as mp3
+        output_template = str(PROJECT_ROOT / f"{job_id}.%(ext)s")
+        cmd = [
+            "yt-dlp",
+            "--no-playlist",
+            "-x",                          # extract audio
+            "--audio-format", "mp3",
+            "--audio-quality", "0",
+            "-o", output_template,
+            youtube_url,
+        ]
+        log.info("[job:%s] Downloading YouTube audio: %s", job_id, youtube_url)
+        result = await asyncio.to_thread(
+            subprocess.run, cmd, check=True, capture_output=True, text=True
+        )
+        log.info("[job:%s] yt-dlp stdout: %s", job_id, result.stdout[:300])
+
+        # Find the downloaded file
+        input_path = PROJECT_ROOT / f"{job_id}.mp3"
+        if not input_path.exists():
+            # yt-dlp might have used a different extension before converting
+            candidates = list(PROJECT_ROOT.glob(f"{job_id}.*"))
+            if not candidates:
+                raise RuntimeError("yt-dlp finished but output file not found")
+            input_path = candidates[0]
+
+        log.info("[job:%s] Downloaded to %s (%.2f MB)", job_id, input_path.name, input_path.stat().st_size / 1024 / 1024)
+
+        # Now reuse the same process_job logic
+        await process_job(job_id, input_path)
+
+    except subprocess.CalledProcessError as exc:
+        err_msg = exc.stderr or exc.stdout or "yt-dlp failed with no output"
+        log.error("[job:%s] yt-dlp failed: %s", job_id, err_msg)
+        JOB_STATUS[job_id].update({
+            "status": "failed",
+            "message": f"YouTube download failed: {err_msg[:300]}",
+            "finishedAt": time.time(),
+        })
+        if input_path and input_path.exists():
+            input_path.unlink()
+    except Exception as exc:
+        log.error("[job:%s] YouTube job failed: %s", job_id, exc, exc_info=True)
+        JOB_STATUS[job_id].update({
+            "status": "failed",
+            "message": str(exc),
+            "finishedAt": time.time(),
+        })
+        if input_path and input_path.exists():
+            input_path.unlink()
 
 
 if FRONTEND_DIST.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
