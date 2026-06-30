@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, DragEvent } from 'react';
 import { ProcessingState } from '@/components/ProcessingState';
 import { AudioPlayer } from '@/components/AudioPlayer';
 import { AdSenseSlot } from '@/components/AdSenseSlot';
-import { YouTubeSearch } from '@/components/YouTubeSearch';
+import { YouTubeSearch } from '@/components/YoutubeSearch';
 import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Mic, Music2, Sparkles, AlertCircle, Instagram } from 'lucide-react';
