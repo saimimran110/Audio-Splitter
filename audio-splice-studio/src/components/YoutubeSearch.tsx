@@ -84,15 +84,23 @@ export const YouTubeSearch = ({ onJobStart, onStatusMessage, disabled }: YouTube
     return (
         <div style={{ width: '100%', maxWidth: '700px', margin: '0 auto' }}>
             {/* Search bar */}
-            <div style={{ display: 'flex', gap: '10px', marginBottom: '24px' }}>
+            <div style={{ 
+                display: 'flex', 
+                marginBottom: '24px',
+                position: 'relative',
+                boxShadow: '0 0 20px rgba(168,85,247,0.2)',
+                borderRadius: '9999px',
+                border: '1px solid rgba(168,85,247,0.4)',
+                background: 'rgba(255,255,255,0.03)'
+            }}>
                 <div style={{ position: 'relative', flex: 1 }}>
                     <Search
                         style={{
                             position: 'absolute',
-                            left: '14px',
+                            left: '20px',
                             top: '50%',
                             transform: 'translateY(-50%)',
-                            color: '#6b7280',
+                            color: '#9ca3af',
                             width: '18px',
                             height: '18px',
                             pointerEvents: 'none',
@@ -108,25 +116,16 @@ export const YouTubeSearch = ({ onJobStart, onStatusMessage, disabled }: YouTube
                         disabled={disabled || searching || !!splitingId}
                         style={{
                             width: '100%',
-                            paddingLeft: '42px',
-                            paddingRight: '16px',
-                            paddingTop: '13px',
-                            paddingBottom: '13px',
-                            fontSize: '14px',
-                            background: 'rgba(255,255,255,0.05)',
-                            border: '1px solid rgba(255,255,255,0.12)',
-                            borderRadius: '10px',
+                            paddingLeft: '50px',
+                            paddingRight: '140px',
+                            paddingTop: '16px',
+                            paddingBottom: '16px',
+                            fontSize: '15px',
+                            background: 'transparent',
+                            border: 'none',
                             color: '#e5e7eb',
                             outline: 'none',
                             boxSizing: 'border-box',
-                        }}
-                        onFocus={(e) => {
-                            e.currentTarget.style.borderColor = 'rgba(139,92,246,0.5)';
-                            e.currentTarget.style.background = 'rgba(255,255,255,0.07)';
-                        }}
-                        onBlur={(e) => {
-                            e.currentTarget.style.borderColor = 'rgba(255,255,255,0.12)';
-                            e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
                         }}
                     />
                 </div>
@@ -134,13 +133,17 @@ export const YouTubeSearch = ({ onJobStart, onStatusMessage, disabled }: YouTube
                     onClick={handleSearch}
                     disabled={!query.trim() || searching || !!splitingId || disabled}
                     style={{
-                        padding: '13px 24px',
+                        position: 'absolute',
+                        right: '8px',
+                        top: '50%',
+                        transform: 'translateY(-50%)',
+                        padding: '10px 20px',
                         fontSize: '14px',
                         fontWeight: 600,
-                        color: searching ? '#9ca3af' : '#e5e7eb',
-                        background: searching ? 'rgba(255,255,255,0.04)' : 'rgba(139,92,246,0.2)',
-                        border: '1px solid rgba(139,92,246,0.35)',
-                        borderRadius: '10px',
+                        color: searching ? '#d1d5db' : '#fff',
+                        background: searching ? 'rgba(255,255,255,0.1)' : 'rgba(139,92,246,0.6)',
+                        border: 'none',
+                        borderRadius: '9999px',
                         cursor: searching || !query.trim() || disabled ? 'not-allowed' : 'pointer',
                         whiteSpace: 'nowrap',
                         transition: 'all 0.2s ease',

@@ -28,7 +28,7 @@ from typing import Any
 import re
 from fastapi import FastAPI, File, HTTPException, UploadFile, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 # ── Logging ────────────────────────────────────────────────────────────────────
@@ -69,6 +69,28 @@ app.add_middleware(
 )
 
 OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+
+
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    # Sanitize YouTube API or proxy error messages if any leak in the detail
+    detail = exc.detail
+    if "YouTube API error" in str(detail) or "Cobalt" in str(detail) or "Invidious" in str(detail):
+        detail = "Failed to search YouTube. Please check the URL or try a different song."
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": detail},
+    )
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    log.error("Unhandled exception: %s", exc, exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An unexpected error occurred. Please try again later."},
+    )
 
 
 # ── Cleanup ────────────────────────────────────────────────────────────────────
@@ -272,7 +294,7 @@ async def process_job(job_id: str, input_path: Path) -> None:
             JOB_STATUS[job_id] = {"createdAt": time.time()}
         JOB_STATUS[job_id].update({
             "status": "failed",
-            "message": str(exc),
+            "message": "We encountered an error while separating the vocals from this audio file. Please try another file.",
             "finishedAt": time.time(),
         })
     finally:
@@ -367,7 +389,7 @@ async def youtube_search(q: str, maxResults: int = 8):
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(YOUTUBE_SEARCH_URL, params=params)
         if resp.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"YouTube API error: {resp.text[:200]}")
+            raise HTTPException(status_code=502, detail="Failed to search YouTube. Please try again later.")
         data = resp.json()
 
     # Also fetch video durations
@@ -705,7 +727,7 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
         log.error("[job:%s] YouTube job failed: %s", job_id, exc, exc_info=True)
         JOB_STATUS[job_id].update({
             "status": "failed",
-            "message": f"YouTube download/process failed: {str(exc)[:200]}",
+            "message": "We encountered an error while downloading or processing the YouTube audio. Please try another song or URL.",
             "finishedAt": time.time(),
         })
         if input_path and input_path.exists():

@@ -18,6 +18,9 @@ export default defineConfig(({ mode }) => ({
       "/youtube": "http://127.0.0.1:8000",
     },
   },
+  esbuild: {
+    drop: mode === 'production' ? ['console', 'debugger'] : [],
+  },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
   resolve: {
     alias: {

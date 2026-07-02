@@ -38,9 +38,17 @@ export const splitAudio = async (
     onProgress?.('Job started — AI separation in progress...');
   } catch (err) {
     if (axios.isAxiosError(err)) {
-      throw new Error(err.response?.data?.detail || `Upload failed: ${err.message}`);
+      const status = err.response?.status;
+      const detail = err.response?.data?.detail;
+      if (status === 413) {
+        throw new Error('The audio file is too large. Maximum size allowed is 20MB.');
+      }
+      if (status === 400) {
+        throw new Error(detail || 'Unsupported audio format or invalid file.');
+      }
+      throw new Error(detail || 'Failed to upload file. Please check your internet connection and try again.');
     }
-    throw new Error('Upload failed: unexpected error');
+    throw new Error('Upload failed due to an unexpected error. Please try again.');
   }
 
   // 2. Poll /jobs/{jobId} every 4 seconds until done or failed
@@ -69,7 +77,11 @@ export const splitAudio = async (
     }
 
     if (job.status === 'failed') {
-      throw new Error(job.message || 'Processing failed on the server');
+      throw new Error(
+        job.message && !job.message.includes('failed:') && !job.message.includes('RuntimeError')
+          ? job.message
+          : 'We encountered an error while processing your audio file. Please try another file.'
+      );
     }
 
     // still queued / processing — keep polling
@@ -102,15 +114,26 @@ export interface YouTubeResult {
 }
 
 export const searchYoutube = async (query: string): Promise<YouTubeResult[]> => {
-  const res = await apiClient.get<{ results: YouTubeResult[] }>('/youtube/search', {
-    params: { q: query, maxResults: 8 },
-  });
-  return res.data.results;
+  try {
+    const res = await apiClient.get<{ results: YouTubeResult[] }>('/youtube/search', {
+      params: { q: query, maxResults: 8 },
+    });
+    return res.data.results;
+  } catch (err) {
+    throw new Error('Search failed. Please check your internet connection or try a different search term.');
+  }
 };
 
 export const splitYoutubeAudio = async (url: string, title: string): Promise<string> => {
-  const res = await apiClient.post<{ jobId: string }>('/youtube/split', { url, title });
-  return res.data.jobId;
+  try {
+    const res = await apiClient.post<{ jobId: string }>('/youtube/split', { url, title });
+    return res.data.jobId;
+  } catch (err) {
+    if (axios.isAxiosError(err) && err.response?.data?.detail) {
+      throw new Error(err.response.data.detail);
+    }
+    throw new Error('Failed to start processing the YouTube video. Please check the URL and try again.');
+  }
 };
 
 export const pollJob = async (
@@ -141,7 +164,11 @@ export const pollJob = async (
     }
 
     if (job.status === 'failed') {
-      throw new Error(job.message || 'Processing failed on the server');
+      throw new Error(
+        job.message && !job.message.includes('failed:') && !job.message.includes('RuntimeError')
+          ? job.message
+          : 'We encountered an error while processing the YouTube video. Please try another song or URL.'
+      );
     }
   }
 

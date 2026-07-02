@@ -5,7 +5,7 @@ import { AdSenseSlot } from '@/components/AdSenseSlot';
 import { YouTubeSearch } from '@/components/YoutubeSearch';
 import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Mic, Music2, Sparkles, AlertCircle, Instagram } from 'lucide-react';
+import { Mic, Music2, Sparkles, AlertCircle, Instagram, Search } from 'lucide-react';
 import { splitAudio, getAudioUrl, SplitResult, pollJob } from '@/services/api';
 
 /* ─── Animated Split Waveform Visual ─── */
@@ -374,49 +374,48 @@ const Index = () => {
                 </p>
               </div>
 
-              {/* Animated Split Waveform */}
-              <div className="mb-10">
-                <SplitWaveformVisual />
-              </div>
-
               {/* ── Tab Switcher ── */}
-              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '28px' }}>
-                <div
-                  style={{
-                    display: 'inline-flex',
-                    background: 'rgba(255,255,255,0.04)',
-                    border: '1px solid rgba(255,255,255,0.1)',
-                    borderRadius: '12px',
-                    padding: '4px',
-                    gap: '4px',
-                  }}
-                >
-                  {(['upload', 'youtube'] as const).map((tab) => (
-                    <button
-                      key={tab}
-                      onClick={() => setActiveTab(tab)}
-                      style={{
-                        padding: '9px 22px',
-                        fontSize: '13px',
-                        fontWeight: 600,
-                        fontFamily: 'Poppins, sans-serif',
-                        color: activeTab === tab ? '#e5e7eb' : '#6b7280',
-                        background: activeTab === tab ? 'rgba(139,92,246,0.25)' : 'transparent',
-                        border: activeTab === tab ? '1px solid rgba(139,92,246,0.45)' : '1px solid transparent',
-                        borderRadius: '9px',
-                        cursor: 'pointer',
-                        transition: 'all 0.2s ease',
-                      }}
-                    >
-                      {tab === 'upload' ? '📁  Upload File' : '🎵  Search by Song Name'}
-                    </button>
-                  ))}
-                </div>
+              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '40px', gap: '16px' }}>
+                {(['upload', 'youtube'] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    onClick={() => setActiveTab(tab)}
+                    style={{
+                      padding: '12px 28px',
+                      fontSize: '14px',
+                      fontWeight: 600,
+                      fontFamily: 'Poppins, sans-serif',
+                      color: activeTab === tab ? '#e5e7eb' : '#9ca3af',
+                      background: activeTab === tab ? 'rgba(139,92,246,0.15)' : 'rgba(255,255,255,0.03)',
+                      border: activeTab === tab ? '1px solid rgba(168,85,247,0.4)' : '1px solid rgba(255,255,255,0.08)',
+                      borderRadius: '9999px',
+                      cursor: 'pointer',
+                      transition: 'all 0.3s ease',
+                      boxShadow: activeTab === tab ? '0 0 20px rgba(168,85,247,0.3)' : 'none',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px'
+                    }}
+                  >
+                    {tab === 'upload' ? (
+                      <>
+                        <Music2 size={16} /> Upload Audio
+                      </>
+                    ) : (
+                      <>
+                        <Search size={16} /> Search YouTube
+                      </>
+                    )}
+                  </button>
+                ))}
               </div>
 
               {/* ── Upload Tab ── */}
               {activeTab === 'upload' && (
                 <div className="text-center">
+                  <div className="mb-10">
+                    <SplitWaveformVisual />
+                  </div>
                   <button
                     onClick={() => fileInputRef.current?.click()}
                     className="btn-shimmer btn-press"
