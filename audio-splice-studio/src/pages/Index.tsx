@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, DragEvent } from 'react';
+import { Link } from 'react-router-dom';
 import { ProcessingState } from '@/components/ProcessingState';
 import { AudioPlayer } from '@/components/AudioPlayer';
 import { AdSenseSlot } from '@/components/AdSenseSlot';
@@ -6,7 +7,7 @@ import { YouTubeSearch } from '@/components/YoutubeSearch';
 import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Mic, Music2, Sparkles, AlertCircle, Instagram, Search } from 'lucide-react';
-import { splitAudio, getAudioUrl, SplitResult, pollJob } from '@/services/api';
+import { splitAudio, getAudioUrl, SplitResult, pollJob, cancelJob } from '@/services/api';
 
 /* ─── Animated Split Waveform Visual ─── */
 const SplitWaveformVisual = () => {
@@ -187,6 +188,7 @@ const SplitWaveformVisual = () => {
 /* ─── Main Page ─── */
 const Index = () => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [songName, setSongName] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [isCompleting, setIsCompleting] = useState(false); // bar racing to 100%
   const [result, setResult] = useState<SplitResult | null>(null);
@@ -197,6 +199,8 @@ const Index = () => {
   const [activeTab, setActiveTab] = useState<'upload' | 'youtube'>('upload');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const featureCardsRef = useRef<HTMLDivElement>(null);
+  const isCancelledRef = useRef<boolean>(false);
+  const activeJobIdRef = useRef<string | null>(null);
 
   // Scroll reveal for feature cards
   useEffect(() => {
@@ -229,13 +233,22 @@ const Index = () => {
 
   const handleFileUpload = async (file: File) => {
     setSelectedFile(file);
+    const baseName = file.name.substring(0, file.name.lastIndexOf('.')) || file.name;
+    setSongName(baseName);
     setIsProcessing(true);
     setIsCompleting(false);
     setError(null);
     setPendingResult(null);
     setStatusMessage('Uploading file...');
+    isCancelledRef.current = false;
+    activeJobIdRef.current = null;
     try {
-      const splitResult = await splitAudio(file, setStatusMessage);
+      const splitResult = await splitAudio(
+        file,
+        setStatusMessage,
+        (jobId) => { activeJobIdRef.current = jobId; },
+        () => isCancelledRef.current
+      );
       if (!splitResult?.vocals || !splitResult?.karaoke) {
         throw new Error('Processing completed but audio URLs are missing. Please hard-refresh (Ctrl+Shift+R) and try again.');
       }
@@ -251,6 +264,9 @@ const Index = () => {
         setPendingResult(null);
       }, 2000);
     } catch (err) {
+      if (err instanceof Error && err.message === 'Cancelled') {
+        return;
+      }
       setError(err instanceof Error ? err.message : 'Failed to process audio file');
       setSelectedFile(null);
       setIsProcessing(false);
@@ -260,6 +276,12 @@ const Index = () => {
   };
 
   const handleCancelProcessing = () => {
+    isCancelledRef.current = true;
+    const jobId = activeJobIdRef.current;
+    if (jobId) {
+      cancelJob(jobId);
+    }
+    activeJobIdRef.current = null;
     setIsProcessing(false);
     setIsCompleting(false);
     setSelectedFile(null);
@@ -268,15 +290,18 @@ const Index = () => {
   };
 
   // Called when YouTubeSearch already queued the job — we just need to poll
-  const handleYoutubeJobStart = async (jobId: string) => {
+  const handleYoutubeJobStart = async (jobId: string, title?: string) => {
     setSelectedFile(new File([], 'youtube')); // sentinel so UI shows processing
+    setSongName(title || 'YouTube Audio');
     setIsProcessing(true);
     setIsCompleting(false);
     setError(null);
     setPendingResult(null);
     setStatusMessage('Downloading and processing YouTube audio...');
+    isCancelledRef.current = false;
+    activeJobIdRef.current = jobId;
     try {
-      const splitResult = await pollJob(jobId, setStatusMessage);
+      const splitResult = await pollJob(jobId, setStatusMessage, () => isCancelledRef.current);
       if (!splitResult?.vocals || !splitResult?.karaoke) {
         throw new Error('Processing completed but audio URLs are missing.');
       }
@@ -290,6 +315,9 @@ const Index = () => {
         setPendingResult(null);
       }, 2000);
     } catch (err) {
+      if (err instanceof Error && err.message === 'Cancelled') {
+        return;
+      }
       setError(err instanceof Error ? err.message : 'Failed to process YouTube audio');
       setSelectedFile(null);
       setIsProcessing(false);
@@ -326,15 +354,23 @@ const Index = () => {
                 className="h-10 w-auto object-contain"
               />
             </div>
-            <div className="flex items-center gap-6">
-              <a href="#features" className="text-sm text-muted-foreground hover:text-foreground transition-colors hidden sm:block">
-                HOW IT WORKS
-              </a>
+            <div className="flex items-center gap-4 sm:gap-6">
+              <nav className="flex items-center gap-3 sm:gap-6 text-xs sm:text-sm font-medium text-muted-foreground">
+                <Link to="/" className="hover:text-primary transition-colors duration-200">
+                  Home
+                </Link>
+                <Link to="/about" className="hover:text-primary transition-colors duration-200">
+                  About & Contact
+                </Link>
+                <Link to="/privacy" className="hover:text-primary transition-colors duration-200">
+                  Privacy Policy
+                </Link>
+              </nav>
               <a
                 href="https://www.instagram.com/saimimran__?igsh=MXJyMnB4dzl5bmJtbw=="
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-muted-foreground hover:text-primary transition-colors"
+                className="text-muted-foreground hover:text-primary transition-colors pl-2 border-l border-border/30"
                 aria-label="Instagram"
               >
                 <Instagram className="h-5 w-5" />
@@ -537,6 +573,7 @@ const Index = () => {
                   downloadUrl={getAudioUrl(result.vocals)}
                   icon={<Mic className="h-5 w-5" />}
                   variant="vocals"
+                  songName={songName}
                 />
                 <AudioPlayer
                   title="Instrumental"
@@ -544,6 +581,7 @@ const Index = () => {
                   downloadUrl={getAudioUrl(result.karaoke)}
                   icon={<Music2 className="h-5 w-5" />}
                   variant="instrumental"
+                  songName={songName}
                 />
               </div>
               <div className="text-center">
@@ -600,14 +638,7 @@ const Index = () => {
         </div>
       </main>
 
-      {/* Footer */}
-      {/* <footer className="border-t border-border/50 bg-background/80 mt-8 relative z-10">
-        <div className="container mx-auto px-4 py-8">
-          <div className="text-center text-muted-foreground">
-            <p>&copy; 2024 Kareoke Splitter. Built with ❤️ for music lovers.</p>
-          </div>
-        </div>
-      </footer> */}
+
     </div>
   );
 };

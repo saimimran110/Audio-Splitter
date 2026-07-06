@@ -3,7 +3,7 @@ import { Search, Music2, Loader2, Clock, ExternalLink } from 'lucide-react';
 import { searchYoutube, splitYoutubeAudio, YouTubeResult } from '@/services/api';
 
 interface YouTubeSearchProps {
-    onJobStart: (jobId: string) => void;
+    onJobStart: (jobId: string, title?: string) => void;
     onStatusMessage: (msg: string) => void;
     disabled?: boolean;
 }
@@ -72,7 +72,7 @@ export const YouTubeSearch = ({ onJobStart, onStatusMessage, disabled }: YouTube
         try {
             onStatusMessage(`Queueing "${video.title}" for processing...`);
             const jobId = await splitYoutubeAudio(video.url, video.title);
-            onJobStart(jobId);
+            onJobStart(jobId, video.title);
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Failed to start processing');
             setSplitingId(null);
@@ -316,6 +316,21 @@ export const YouTubeSearch = ({ onJobStart, onStatusMessage, disabled }: YouTube
                     </p>
                 </div>
             )}
+
+            {/* Disclaimer */}
+            <div style={{ 
+                marginTop: '24px', 
+                padding: '12px', 
+                borderRadius: '8px', 
+                border: '1px solid rgba(255,255,255,0.05)', 
+                background: 'rgba(255,255,255,0.01)',
+                textAlign: 'center', 
+                fontSize: '11px', 
+                color: '#6b7280',
+                lineHeight: '1.5'
+            }}>
+                For personal/educational use only. Please support artists by purchasing music.
+            </div>
 
             <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }

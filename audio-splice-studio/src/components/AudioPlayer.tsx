@@ -10,11 +10,12 @@ interface AudioPlayerProps {
   downloadUrl: string;
   icon: React.ReactNode;
   variant: 'vocals' | 'instrumental';
+  songName?: string;
 }
 
 const BAR_COUNT = 40;
 
-export const AudioPlayer = ({ title, audioUrl, downloadUrl, icon, variant }: AudioPlayerProps) => {
+export const AudioPlayer = ({ title, audioUrl, downloadUrl, icon, variant, songName }: AudioPlayerProps) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -88,7 +89,16 @@ export const AudioPlayer = ({ title, audioUrl, downloadUrl, icon, variant }: Aud
   const handleDownload = () => {
     const link = document.createElement('a');
     link.href = downloadUrl;
-    link.download = `${title.toLowerCase().replace(/\s+/g, '_')}.mp3`;
+    
+    let filename = '';
+    if (songName) {
+      const suffix = variant === 'vocals' ? 'vocals' : 'instrument';
+      filename = `${songName}_${suffix}.mp3`;
+    } else {
+      filename = variant === 'vocals' ? 'vocals.mp3' : 'instrument.mp3';
+    }
+    
+    link.download = filename;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);

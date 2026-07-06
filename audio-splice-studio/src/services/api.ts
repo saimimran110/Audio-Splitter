@@ -17,6 +17,14 @@ export interface JobStatus {
   karaoke?: string;
 }
 
+export const cancelJob = async (jobId: string): Promise<void> => {
+  try {
+    await apiClient.post(`/jobs/${jobId}/cancel`);
+  } catch (err) {
+    console.error('Failed to cancel job:', err);
+  }
+};
+
 /**
  * Upload audio file, then poll until the job finishes.
  * This avoids the Hugging Face 60-second reverse-proxy timeout
@@ -26,7 +34,11 @@ export interface JobStatus {
 export const splitAudio = async (
   file: File,
   onProgress?: (message: string) => void,
+  onJobId?: (jobId: string) => void,
+  isCancelled?: () => boolean,
 ): Promise<SplitResult> => {
+  if (isCancelled?.()) throw new Error('Cancelled');
+  
   // 1. Upload and get a job ID immediately
   const formData = new FormData();
   formData.append('file', file);
@@ -35,6 +47,7 @@ export const splitAudio = async (
   try {
     const res = await apiClient.post<{ jobId: string }>('/split', formData);
     jobId = res.data.jobId;
+    onJobId?.(jobId);
     onProgress?.('Job started — AI separation in progress...');
   } catch (err) {
     if (axios.isAxiosError(err)) {
@@ -57,7 +70,9 @@ export const splitAudio = async (
   const started = Date.now();
 
   while (Date.now() - started < MAX_WAIT_MS) {
+    if (isCancelled?.()) throw new Error('Cancelled');
     await sleep(POLL_INTERVAL_MS);
+    if (isCancelled?.()) throw new Error('Cancelled');
 
     let job: JobStatus;
     try {
@@ -139,13 +154,16 @@ export const splitYoutubeAudio = async (url: string, title: string): Promise<str
 export const pollJob = async (
   jobId: string,
   onProgress?: (message: string) => void,
+  isCancelled?: () => boolean,
 ): Promise<SplitResult> => {
   const POLL_INTERVAL_MS = 4000;
   const MAX_WAIT_MS = 15 * 60 * 1000;
   const started = Date.now();
 
   while (Date.now() - started < MAX_WAIT_MS) {
+    if (isCancelled?.()) throw new Error('Cancelled');
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+    if (isCancelled?.()) throw new Error('Cancelled');
 
     let job: JobStatus;
     try {

@@ -178,7 +178,22 @@ async def get_audio_file(model_name: str, job_id: str, filename: str, request: R
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
-def resample_audio(input_path: Path, output_path: Path) -> None:
+ACTIVE_PROCESSES: dict[str, subprocess.Popen] = {}
+
+def run_subprocess_killable(cmd: list[str], job_id: str) -> subprocess.CompletedProcess:
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    ACTIVE_PROCESSES[job_id] = proc
+    try:
+        stdout, stderr = proc.communicate()
+        retcode = proc.poll()
+        if retcode:
+            raise subprocess.CalledProcessError(retcode, cmd, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(cmd, retcode, stdout, stderr)
+    finally:
+        ACTIVE_PROCESSES.pop(job_id, None)
+
+
+def resample_audio(input_path: Path, output_path: Path, job_id: str) -> None:
     """Resample input audio to 44100Hz stereo WAV using ffmpeg."""
     cmd = [
         "ffmpeg", "-y",
@@ -187,11 +202,11 @@ def resample_audio(input_path: Path, output_path: Path) -> None:
         "-ar", "44100",
         str(output_path),
     ]
-    subprocess.run(cmd, check=True, capture_output=True)
+    run_subprocess_killable(cmd, job_id)
     log.info("Resampled %s → %s (44100Hz stereo WAV)", input_path.name, output_path.name)
 
 
-def convert_wav_to_mp3(wav_path: Path, mp3_path: Path, bitrate: str = "192k") -> None:
+def convert_wav_to_mp3(wav_path: Path, mp3_path: Path, job_id: str, bitrate: str = "192k") -> None:
     """Convert WAV → MP3 using ffmpeg (already in container)."""
     cmd = [
         "ffmpeg", "-y",
@@ -201,7 +216,7 @@ def convert_wav_to_mp3(wav_path: Path, mp3_path: Path, bitrate: str = "192k") ->
         "-ac", "2",
         str(mp3_path),
     ]
-    subprocess.run(cmd, check=True, capture_output=True)
+    run_subprocess_killable(cmd, job_id)
     wav_path.unlink()
     log.info("Converted %s → %s", wav_path.name, mp3_path.name)
 
@@ -219,7 +234,7 @@ def run_demucs(input_path: Path, job_id: str) -> None:
     log.info("[job:%s] Running demucs: %s", job_id, " ".join(cmd))
     t0 = time.time()
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        result = run_subprocess_killable(cmd, job_id)
         elapsed = time.time() - t0
         log.info("[job:%s] Demucs finished in %.1fs", job_id, elapsed)
         if result.stdout:
@@ -243,7 +258,7 @@ async def process_job(job_id: str, input_path: Path) -> None:
 
         # 1. Resample to standard 44.1kHz Stereo WAV
         resampled_path = input_path.parent / f"{job_id}_resampled.wav"
-        await asyncio.to_thread(resample_audio, input_path, resampled_path)
+        await asyncio.to_thread(resample_audio, input_path, resampled_path, job_id)
 
         # 2. Delete original upload to save space
         if input_path.exists():
@@ -266,7 +281,7 @@ async def process_job(job_id: str, input_path: Path) -> None:
             wav = output_dir / f"{stem}.wav"
             mp3 = output_dir / f"{stem}.mp3"
             if wav.exists():
-                await asyncio.to_thread(convert_wav_to_mp3, wav, mp3)
+                await asyncio.to_thread(convert_wav_to_mp3, wav, mp3, job_id)
 
         vocals_mp3 = output_dir / "vocals.mp3"
         karaoke_mp3 = output_dir / "no_vocals.mp3"
@@ -357,6 +372,26 @@ async def get_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"jobId": job_id, **job}
+
+
+@app.post("/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str):
+    log.info("[job:%s] Cancel requested", job_id)
+    proc = ACTIVE_PROCESSES.get(job_id)
+    if proc:
+        try:
+            proc.kill()
+            log.info("[job:%s] Killed running subprocess", job_id)
+        except Exception as e:
+            log.warning("[job:%s] Failed to kill subprocess: %s", job_id, e)
+    
+    if job_id in JOB_STATUS:
+        JOB_STATUS[job_id].update({
+            "status": "failed",
+            "message": "Job was cancelled by user.",
+            "finishedAt": time.time()
+        })
+    return {"status": "cancelled"}
 
 
 @app.post("/cleanup")
@@ -703,7 +738,7 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                 ]
                 log.info("[job:%s] Running yt-dlp fallback: %s", job_id, " ".join(cmd))
                 result = await asyncio.to_thread(
-                    subprocess.run, cmd, check=True, capture_output=True, text=True
+                    run_subprocess_killable, cmd, job_id
                 )
                 log.info("[job:%s] yt-dlp output: %s", job_id, result.stdout[:200])
 
