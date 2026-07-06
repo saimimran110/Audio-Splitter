@@ -28,8 +28,10 @@ from typing import Any
 import re
 from fastapi import FastAPI, File, HTTPException, UploadFile, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.exception_handlers import http_exception_handler
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -75,6 +77,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if exc.status_code == 404:
+        path = request.url.path
+        if not any(path.startswith(prefix) for prefix in ["/split", "/youtube", "/jobs", "/files", "/config"]):
+            index_path = FRONTEND_DIST / "index.html"
+            if index_path.exists():
+                return FileResponse(str(index_path))
+
     # Sanitize YouTube API or proxy error messages if any leak in the detail
     detail = exc.detail
     if "YouTube API error" in str(detail) or "Cobalt" in str(detail) or "Invidious" in str(detail):
