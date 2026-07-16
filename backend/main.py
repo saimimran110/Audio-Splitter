@@ -530,10 +530,11 @@ def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
         )
         with _urllib_request.urlopen(req, timeout=10) as response:
             data = _json.loads(response.read().decode('utf-8'))
+            payload_data = data.get("data", {})
             # Get list of instances for youtube or youtube-music
-            instances = data.get("youtube", [])
+            instances = payload_data.get("youtube", [])
             # Merge youtube-music instances if any are unique
-            for inst in data.get("youtube-music", []):
+            for inst in payload_data.get("youtube-music", []):
                 if inst not in instances:
                     instances.append(inst)
     except Exception as e:
@@ -542,9 +543,12 @@ def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
 
     # Static fallbacks just in case the list is empty or the directory is down
     static_fallbacks = [
+        "https://rue-cobalt.xenon.zone",
+        "https://cobalt.alpha.wolfy.love",
+        "https://nuko-c.meowing.de",
+        "https://api.qwkuns.me",
         "https://api.cobalt.blackcat.sweeux.org",
         "https://subito-c.meowing.de",
-        "https://rue-cobalt.xenon.zone",
         "https://dog.kittycat.boo",
         "https://fox.kittycat.boo"
     ]
@@ -557,57 +561,80 @@ def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
 
     for api_url in instances:
         log.info("Trying Cobalt instance for audio download: %s", api_url)
-        try:
-            payload = {
-                "url": video_url,
-                "downloadMode": "audio"
-            }
-            req = _urllib_request.Request(
-                api_url,
-                data=_json.dumps(payload).encode('utf-8'),
-                headers={
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'Mozilla/5.0'
-                },
-                method='POST'
-            )
-            with _urllib_request.urlopen(req, timeout=12) as response:
-                res_data = _json.loads(response.read().decode('utf-8'))
-                
-                # If the instance returned an error status in JSON
-                if res_data.get("status") == "error":
-                    err_info = res_data.get("error", {})
-                    raise RuntimeError(f"Cobalt instance error: {err_info.get('code') or res_data.get('text')}")
-                
-                download_url = res_data.get("url")
-                if not download_url:
-                    raise RuntimeError("No download URL returned by instance")
-                
-                log.info("Downloading Cobalt stream: %s", download_url[:120])
-                
-                # Stream the download to local disk
-                download_req = _urllib_request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
-                with _urllib_request.urlopen(download_req, timeout=20) as download_res:
-                    # Verify HTTP response code
-                    if download_res.status != 200:
-                        raise RuntimeError(f"Download stream returned status code {download_res.status}")
-                        
-                    with open(output_path, "wb") as f:
-                        _shutil.copyfileobj(download_res, f)
-                        
-                # Check downloaded file size (minimum 100 KB)
-                if output_path.exists() and output_path.stat().st_size > 100 * 1024:
-                    log.info("Successfully downloaded YouTube audio using Cobalt instance (%s)", api_url)
-                    success = True
-                    break
+        success_inst = False
+        for version in ("v10", "v7"):
+            try:
+                if version == "v10":
+                    target_url = api_url
+                    payload = {
+                        "url": video_url,
+                        "downloadMode": "audio"
+                    }
                 else:
-                    raise RuntimeError("Downloaded file is empty or too small")
-        except Exception as e:
-            log.warning("Cobalt download failed for instance %s: %s", api_url, e)
-            last_error = e
-            if output_path.exists():
-                output_path.unlink()
+                    target_url = f"{api_url.rstrip('/')}/api/json"
+                    payload = {
+                        "url": video_url,
+                        "isAudioOnly": True,
+                        "aFormat": "mp3"
+                    }
+                
+                req = _urllib_request.Request(
+                    target_url,
+                    data=_json.dumps(payload).encode('utf-8'),
+                    headers={
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json',
+                        'User-Agent': 'Mozilla/5.0'
+                    },
+                    method='POST'
+                )
+                with _urllib_request.urlopen(req, timeout=12) as response:
+                    res_data = _json.loads(response.read().decode('utf-8'))
+                    
+                    # If the instance returned an error status in JSON
+                    if res_data.get("status") == "error":
+                        err_info = res_data.get("error", {})
+                        raise RuntimeError(f"Cobalt instance error: {err_info.get('code') or res_data.get('text')}")
+                    
+                    download_url = res_data.get("url")
+                    if not download_url:
+                        raise RuntimeError("No download URL returned by instance")
+                    
+                    log.info("Downloading Cobalt stream: %s", download_url[:120])
+                    
+                    # Stream the download to local disk
+                    download_req = _urllib_request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
+                    start_time = time.time()
+                    with _urllib_request.urlopen(download_req, timeout=10) as download_res:
+                        # Verify HTTP response code
+                        if download_res.status != 200:
+                            raise RuntimeError(f"Download stream returned status code {download_res.status}")
+                            
+                        with open(output_path, "wb") as f:
+                            while True:
+                                if time.time() - start_time > 45:
+                                    raise TimeoutError("Cobalt download stream timed out (exceeded 45 seconds)")
+                                chunk = download_res.read(16384)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                            
+                    # Check downloaded file size (minimum 100 KB)
+                    if output_path.exists() and output_path.stat().st_size > 100 * 1024:
+                        log.info("Successfully downloaded YouTube audio using Cobalt instance (%s)", api_url)
+                        success_inst = True
+                        break
+                    else:
+                        raise RuntimeError("Downloaded file is empty or too small")
+            except Exception as e:
+                log.warning("Cobalt %s download failed for instance %s: %s", version, target_url if version == "v7" else api_url, e)
+                last_error = e
+                if output_path.exists():
+                    output_path.unlink()
+        
+        if success_inst:
+            success = True
+            break
 
     if not success:
         raise RuntimeError(f"All Cobalt download attempts failed. Last error: {last_error}")
@@ -691,9 +718,16 @@ def download_via_invidious_proxy(video_id: str, output_path: Path) -> None:
                     
                     # Stream the download to local disk
                     download_req = _urllib_request.Request(stream_url, headers={"User-Agent": "Mozilla/5.0"})
-                    with _urllib_request.urlopen(download_req, timeout=20) as download_res:
+                    start_time = time.time()
+                    with _urllib_request.urlopen(download_req, timeout=10) as download_res:
                         with open(output_path, "wb") as f:
-                            _shutil.copyfileobj(download_res, f)
+                            while True:
+                                if time.time() - start_time > 30:
+                                    raise TimeoutError("Invidious download stream timed out (exceeded 30 seconds)")
+                                chunk = download_res.read(16384)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
                             
                     # Check downloaded file size (minimum 100 KB)
                     if output_path.exists() and output_path.stat().st_size > 100 * 1024:
