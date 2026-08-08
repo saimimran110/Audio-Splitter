@@ -863,20 +863,21 @@ def download_via_piped_proxy(video_id: str, output_path: Path) -> None:
 
 
 def download_via_ytdlp_stream(youtube_url: str, output_path: Path, job_id: str) -> None:
-    """Extract direct audio stream URL with yt-dlp and stream directly via FFmpeg."""
+    """Extract direct audio stream URL with python -m yt_dlp and stream directly via FFmpeg."""
     cmd_url = [
-        "yt-dlp",
+        sys.executable, "-m", "yt_dlp",
         "--no-playlist",
         "--force-ipv4",
-        "--socket-timeout", "5",
+        "--socket-timeout", "10",
         "--no-warnings",
+        "--js-runtimes", "node",
         "-g",
         "-f", "bestaudio/best",
         "--extractor-args", "youtube:player_client=android,web",
         youtube_url,
     ]
     log.info("[job:%s] Extracting stream URL via yt-dlp: %s", job_id, " ".join(cmd_url))
-    proc_url = run_subprocess_killable(cmd_url, job_id, timeout=12)
+    proc_url = run_subprocess_killable(cmd_url, job_id, timeout=15)
     stream_url = proc_url.stdout.strip().split('\n')[0] if proc_url.stdout else ""
     if not stream_url or not stream_url.startswith("http"):
         raise RuntimeError("yt-dlp failed to extract stream URL")
@@ -952,8 +953,11 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                 JOB_STATUS[job_id]["message"] = "Downloading audio (trying direct download)..."
                 output_template = str(PROJECT_ROOT / f"{job_id}.%(ext)s")
                 cmd = [
-                    "yt-dlp",
+                    sys.executable, "-m", "yt_dlp",
                     "--no-playlist",
+                    "--force-ipv4",
+                    "--socket-timeout", "10",
+                    "--js-runtimes", "node",
                     "-x",                          # extract audio
                     "--audio-format", "mp3",
                     "--audio-quality", "0",
@@ -965,7 +969,7 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                 ]
                 log.info("[job:%s] Running yt-dlp fallback: %s", job_id, " ".join(cmd))
                 result = await asyncio.to_thread(
-                    run_subprocess_killable, cmd, job_id
+                    run_subprocess_killable, cmd, job_id, 30
                 )
                 log.info("[job:%s] yt-dlp output: %s", job_id, result.stdout[:200] if result.stdout else "")
 
