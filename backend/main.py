@@ -42,8 +42,15 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── App setup ──────────────────────────────────────────────────────────────────
+from dotenv import load_dotenv
+
 app = FastAPI()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Load local .env files if present (backend/.env and project root .env)
+load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(PROJECT_ROOT / ".env")
+
 OUTPUT_FOLDER = PROJECT_ROOT / "demucs_output"
 FRONTEND_DIST = PROJECT_ROOT / "audio-splice-studio" / "dist"
 MODEL = os.getenv("DEMUCS_MODEL", "htdemucs")
