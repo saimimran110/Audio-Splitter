@@ -410,7 +410,7 @@ async def manual_cleanup():
 # ── YouTube Feature ────────────────────────────────────────────────────────────
 import httpx
 
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "AIzaSyDpSx9c1thanBoyHW8CCex1E5ai2Mmy7yg")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
 YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 
@@ -420,6 +420,9 @@ async def youtube_search(q: str, maxResults: int = 8):
     """Search YouTube for songs and return results with thumbnails and metadata."""
     if not q.strip():
         raise HTTPException(status_code=400, detail="Query is required")
+
+    if not YOUTUBE_API_KEY:
+        raise HTTPException(status_code=500, detail="YouTube API Key is not configured on the server.")
 
     params = {
         "part": "snippet",
