@@ -1004,7 +1004,7 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
         log.error("[job:%s] YouTube job failed: %s", job_id, exc, exc_info=True)
         JOB_STATUS[job_id].update({
             "status": "failed",
-            "message": "We encountered an error while downloading or processing the YouTube audio. Please try another song or URL.",
+            "message": f"Error: {str(exc)}",
             "finishedAt": time.time(),
         })
         if input_path and input_path.exists():
