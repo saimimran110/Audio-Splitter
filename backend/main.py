@@ -779,7 +779,7 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                 output_template = str(PROJECT_ROOT / f"{job_id}.%(ext)s")
                 cookies_file = os.getenv("YOUTUBE_COOKIES_FILE", "").strip()
                 base_cmd = [
-                    sys.executable, "-m", "yt_dlp",
+                    "yt-dlp",
                     "--no-playlist",
                     "-x",                          # extract audio
                     "--audio-format", "mp3",
