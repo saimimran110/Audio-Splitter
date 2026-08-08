@@ -21,10 +21,12 @@ ENV VECLIB_MAXIMUM_THREADS=2
 ENV TORCH_HOME=/app/.cache/torch
 ENV HF_HOME=/app/.cache/hub
 
-# Install ffmpeg and libsndfile
+# Install ffmpeg, libsndfile, nodejs (JS runtime for yt-dlp n-sig solver), and ca-certificates
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
+    nodejs \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt /app/backend/requirements.txt

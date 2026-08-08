@@ -863,6 +863,8 @@ def download_via_ytdlp_stream(youtube_url: str, output_path: Path, job_id: str) 
     cmd_url = [
         "yt-dlp",
         "--no-playlist",
+        "--socket-timeout", "10",
+        "--no-warnings",
         "-g",
         "-f", "bestaudio/best",
         "--extractor-args", "youtube:player_client=android,web",
