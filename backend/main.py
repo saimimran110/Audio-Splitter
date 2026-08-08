@@ -196,15 +196,19 @@ async def get_audio_file(model_name: str, job_id: str, filename: str, request: R
 # ── Helpers ────────────────────────────────────────────────────────────────────
 ACTIVE_PROCESSES: dict[str, subprocess.Popen] = {}
 
-def run_subprocess_killable(cmd: list[str], job_id: str) -> subprocess.CompletedProcess:
+def run_subprocess_killable(cmd: list[str], job_id: str, timeout: float | None = None) -> subprocess.CompletedProcess:
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     ACTIVE_PROCESSES[job_id] = proc
     try:
-        stdout, stderr = proc.communicate()
+        stdout, stderr = proc.communicate(timeout=timeout)
         retcode = proc.poll()
         if retcode:
             raise subprocess.CalledProcessError(retcode, cmd, output=stdout, stderr=stderr)
         return subprocess.CompletedProcess(cmd, retcode, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise TimeoutError(f"Subprocess timed out after {timeout} seconds: {' '.join(cmd)}")
     finally:
         ACTIVE_PROCESSES.pop(job_id, None)
 
@@ -863,7 +867,8 @@ def download_via_ytdlp_stream(youtube_url: str, output_path: Path, job_id: str) 
     cmd_url = [
         "yt-dlp",
         "--no-playlist",
-        "--socket-timeout", "10",
+        "--force-ipv4",
+        "--socket-timeout", "5",
         "--no-warnings",
         "-g",
         "-f", "bestaudio/best",
@@ -871,7 +876,7 @@ def download_via_ytdlp_stream(youtube_url: str, output_path: Path, job_id: str) 
         youtube_url,
     ]
     log.info("[job:%s] Extracting stream URL via yt-dlp: %s", job_id, " ".join(cmd_url))
-    proc_url = run_subprocess_killable(cmd_url, job_id)
+    proc_url = run_subprocess_killable(cmd_url, job_id, timeout=12)
     stream_url = proc_url.stdout.strip().split('\n')[0] if proc_url.stdout else ""
     if not stream_url or not stream_url.startswith("http"):
         raise RuntimeError("yt-dlp failed to extract stream URL")
