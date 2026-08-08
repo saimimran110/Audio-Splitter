@@ -863,28 +863,31 @@ def download_via_piped_proxy(video_id: str, output_path: Path) -> None:
 
 
 def download_via_ytdlp_stream(youtube_url: str, output_path: Path, job_id: str) -> None:
-    """Extract direct audio stream URL with python -m yt_dlp and stream directly via FFmpeg."""
+    """Extract direct audio stream URL with python -m yt_dlp using mweb client + Mobile headers, then stream via FFmpeg."""
     cmd_url = [
         sys.executable, "-m", "yt_dlp",
         "--no-playlist",
         "--force-ipv4",
         "--socket-timeout", "10",
         "--no-warnings",
-        "--js-runtimes", "node",
         "-g",
         "-f", "bestaudio/best",
-        "--extractor-args", "youtube:player_client=android,web",
+        "--extractor-args", "youtube:player_client=mweb,android",
+        "--user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+        "--referer", "https://www.youtube.com/",
+        "--add-header", "Accept-Language: en-US,en;q=0.9",
         youtube_url,
     ]
-    log.info("[job:%s] Extracting stream URL via yt-dlp: %s", job_id, " ".join(cmd_url))
-    proc_url = run_subprocess_killable(cmd_url, job_id, timeout=15)
+    log.info("[job:%s] Extracting stream URL via yt-dlp (mweb): %s", job_id, " ".join(cmd_url))
+    proc_url = run_subprocess_killable(cmd_url, job_id, timeout=20)
     stream_url = proc_url.stdout.strip().split('\n')[0] if proc_url.stdout else ""
     if not stream_url or not stream_url.startswith("http"):
-        raise RuntimeError("yt-dlp failed to extract stream URL")
+        raise RuntimeError("yt-dlp mweb failed to extract stream URL")
 
     log.info("[job:%s] Direct stream URL extracted. Streaming audio with FFmpeg...", job_id)
     cmd_ffmpeg = [
         "ffmpeg", "-y",
+        "-headers", "User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15\r\nReferer: https://www.youtube.com/\r\n",
         "-i", stream_url,
         "-vn",
         "-ac", "2",
@@ -892,7 +895,7 @@ def download_via_ytdlp_stream(youtube_url: str, output_path: Path, job_id: str) 
         "-b:a", "192k",
         str(output_path),
     ]
-    run_subprocess_killable(cmd_ffmpeg, job_id)
+    run_subprocess_killable(cmd_ffmpeg, job_id, timeout=30)
     if not output_path.exists() or output_path.stat().st_size < 100 * 1024:
         raise RuntimeError("FFmpeg stream download produced invalid or empty file")
     log.info("[job:%s] Direct stream download complete! (%.2f MB)", job_id, output_path.stat().st_size / 1024 / 1024)
@@ -947,7 +950,7 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
             except Exception as inv_err:
                 log.warning("[job:%s] Invidious proxy download failed: %s", job_id, inv_err)
 
-        # Tier 5: Fallback: full yt-dlp with android client
+        # Tier 5: Fallback: full yt-dlp with mweb client + mobile headers
         if not download_succeeded:
             try:
                 JOB_STATUS[job_id]["message"] = "Downloading audio (trying direct download)..."
@@ -957,13 +960,14 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                     "--no-playlist",
                     "--force-ipv4",
                     "--socket-timeout", "10",
-                    "--js-runtimes", "node",
                     "-x",                          # extract audio
                     "--audio-format", "mp3",
                     "--audio-quality", "0",
-                    "--extractor-args", "youtube:player_client=android,web",
+                    "--extractor-args", "youtube:player_client=mweb,android",
                     "--no-check-certificates",
-                    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                    "--user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+                    "--referer", "https://www.youtube.com/",
+                    "--add-header", "Accept-Language: en-US,en;q=0.9",
                     "-o", output_template,
                     youtube_url,
                 ]
