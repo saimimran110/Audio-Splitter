@@ -518,6 +518,37 @@ async def youtube_split(request: Request):
     return {"jobId": job_id, "status": "queued"}
 
 
+@app.get("/youtube/stream-proxy")
+async def stream_proxy(url: str):
+    """Proxy raw audio stream from YouTube CDN to browser to bypass CORS restrictions."""
+    if not url or not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Invalid stream URL")
+    
+    import urllib.request as _urllib_req
+    try:
+        req = _urllib_req.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        res = _urllib_req.urlopen(req, timeout=30)
+        
+        def iterfile():
+            while True:
+                chunk = res.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+
+        return StreamingResponse(
+            iterfile(),
+            media_type="audio/mpeg",
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Content-Disposition": "attachment; filename=audio_stream.mp3",
+            }
+        )
+    except Exception as e:
+        log.error("Stream proxy failed for URL %s: %s", url[:100], e)
+        raise HTTPException(status_code=500, detail=f"Stream proxy failed: {e}")
+
+
 def extract_youtube_video_id(url: str) -> str:
     import re as _re
     pattern = r'(?:v=|\/v\/|embed\/|youtu\.be\/|\/v=|^)([a-zA-Z0-9_-]{11})'
