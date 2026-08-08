@@ -50,6 +50,17 @@ MODEL = os.getenv("DEMUCS_MODEL", "htdemucs")
 ADSENSE_CLIENT_ID = os.getenv("ADSENSE_CLIENT_ID", "").strip()
 ADSENSE_SLOT_ID = os.getenv("ADSENSE_SLOT_ID", "").strip()
 
+# Auto-generate cookies.txt from Hugging Face secret if present
+COOKIES_PATH = PROJECT_ROOT / "cookies.txt"
+cookies_data = os.getenv("YOUTUBE_COOKIES_DATA", "").strip()
+if cookies_data:
+    try:
+        COOKIES_PATH.write_text(cookies_data, encoding="utf-8")
+        os.environ["YOUTUBE_COOKIES_FILE"] = str(COOKIES_PATH)
+        log.info("Successfully loaded YouTube cookies file from environment secret.")
+    except Exception as e:
+        log.warning("Failed to write YouTube cookies file from environment secret: %s", e)
+
 # In-memory job store  {job_id: {...}}
 JOB_STATUS: dict[str, dict[str, Any]] = {}
 

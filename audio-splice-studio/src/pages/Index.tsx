@@ -7,7 +7,7 @@ import { YouTubeSearch } from '@/components/YoutubeSearch';
 import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Mic, Music2, Sparkles, AlertCircle, Instagram, Search } from 'lucide-react';
-import { splitAudio, getAudioUrl, SplitResult, pollJob, cancelJob } from '@/services/api';
+import { splitAudio, getAudioUrl, SplitResult, pollJob, cancelJob, processYoutubeVideoClient } from '@/services/api';
 
 /* ─── Animated Split Waveform Visual ─── */
 const SplitWaveformVisual = () => {
@@ -289,6 +289,48 @@ const Index = () => {
     setStatusMessage('');
   };
 
+  // Solution 2: Download YouTube audio on client browser (residential IP) and upload to backend
+  const handleYoutubeSelect = async (url: string, title: string) => {
+    setSelectedFile(new File([], title)); // sentinel so UI shows processing
+    setSongName(title);
+    setIsProcessing(true);
+    setIsCompleting(false);
+    setError(null);
+    setPendingResult(null);
+    setStatusMessage('Preparing YouTube audio stream...');
+    isCancelledRef.current = false;
+    try {
+      const splitResult = await processYoutubeVideoClient(
+        url,
+        title,
+        setStatusMessage,
+        (jobId) => { activeJobIdRef.current = jobId; },
+        () => isCancelledRef.current
+      );
+      if (!splitResult?.vocals || !splitResult?.karaoke) {
+        throw new Error('Processing completed but audio URLs are missing.');
+      }
+      setPendingResult(splitResult);
+      setIsCompleting(true);
+      setStatusMessage('');
+      setTimeout(() => {
+        setResult(splitResult);
+        setIsProcessing(false);
+        setIsCompleting(false);
+        setPendingResult(null);
+      }, 2000);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Cancelled') {
+        return;
+      }
+      setError(err instanceof Error ? err.message : 'Failed to process YouTube audio');
+      setSelectedFile(null);
+      setIsProcessing(false);
+      setIsCompleting(false);
+      setStatusMessage('');
+    }
+  };
+
   // Called when YouTubeSearch already queued the job — we just need to poll
   const handleYoutubeJobStart = async (jobId: string, title?: string) => {
     setSelectedFile(new File([], 'youtube')); // sentinel so UI shows processing
@@ -491,6 +533,7 @@ const Index = () => {
               {/* ── YouTube Search Tab ── */}
               {activeTab === 'youtube' && (
                 <YouTubeSearch
+                  onSelectVideo={handleYoutubeSelect}
                   onJobStart={handleYoutubeJobStart}
                   onStatusMessage={setStatusMessage}
                   disabled={isProcessing}

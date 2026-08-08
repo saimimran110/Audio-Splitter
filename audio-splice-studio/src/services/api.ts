@@ -117,6 +117,8 @@ export const checkBackendHealth = async (): Promise<boolean> => {
     return false;
   }
 };
+import { downloadYoutubeAudioInBrowser } from './youtubeDownloader';
+
 // ── YouTube Feature ──────────────────────────────────────────────────────────
 
 export interface YouTubeResult {
@@ -148,6 +150,32 @@ export const splitYoutubeAudio = async (url: string, title: string): Promise<str
       throw new Error(err.response.data.detail);
     }
     throw new Error('Failed to start processing the YouTube video. Please check the URL and try again.');
+  }
+};
+
+/**
+ * Solution 2: Downloads YouTube audio on client browser (residential IP)
+ * and uploads the resulting audio file directly to FastAPI /split.
+ * Falls back to server-side /youtube/split if browser download is blocked.
+ */
+export const processYoutubeVideoClient = async (
+  url: string,
+  title: string,
+  onProgress?: (message: string) => void,
+  onJobId?: (jobId: string) => void,
+  isCancelled?: () => boolean,
+): Promise<SplitResult> => {
+  try {
+    onProgress?.('Extracting YouTube audio stream on browser...');
+    const file = await downloadYoutubeAudioInBrowser(url, title, onProgress);
+    onProgress?.('Uploading audio to AI separation engine...');
+    return await splitAudio(file, onProgress, onJobId, isCancelled);
+  } catch (clientErr) {
+    console.warn('Client-side audio download failed, attempting backend fallback:', clientErr);
+    onProgress?.('Attempting server fallback audio download...');
+    const jobId = await splitYoutubeAudio(url, title);
+    onJobId?.(jobId);
+    return await pollJob(jobId, onProgress, isCancelled);
   }
 };
 

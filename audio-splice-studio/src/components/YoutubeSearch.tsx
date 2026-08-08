@@ -3,7 +3,8 @@ import { Search, Music2, Loader2, Clock, ExternalLink } from 'lucide-react';
 import { searchYoutube, splitYoutubeAudio, YouTubeResult } from '@/services/api';
 
 interface YouTubeSearchProps {
-    onJobStart: (jobId: string, title?: string) => void;
+    onJobStart?: (jobId: string, title?: string) => void;
+    onSelectVideo?: (url: string, title: string) => Promise<void> | void;
     onStatusMessage: (msg: string) => void;
     disabled?: boolean;
 }
@@ -15,7 +16,7 @@ function formatDuration(sec: number): string {
     return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-export const YouTubeSearch = ({ onJobStart, onStatusMessage, disabled }: YouTubeSearchProps) => {
+export const YouTubeSearch = ({ onJobStart, onSelectVideo, onStatusMessage, disabled }: YouTubeSearchProps) => {
     const [query, setQuery] = useState('');
     const [results, setResults] = useState<YouTubeResult[]>([]);
     const [searching, setSearching] = useState(false);
@@ -70,13 +71,19 @@ export const YouTubeSearch = ({ onJobStart, onStatusMessage, disabled }: YouTube
         setSplitingId(video.videoId);
         setError(null);
         try {
-            onStatusMessage(`Queueing "${video.title}" for processing...`);
-            const jobId = await splitYoutubeAudio(video.url, video.title);
-            onJobStart(jobId, video.title);
+            if (onSelectVideo) {
+                await onSelectVideo(video.url, video.title);
+            } else if (onJobStart) {
+                onStatusMessage(`Queueing "${video.title}" for processing...`);
+                const jobId = await splitYoutubeAudio(video.url, video.title);
+                onJobStart(jobId, video.title);
+            }
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Failed to start processing');
             setSplitingId(null);
             onStatusMessage('');
+        } finally {
+            setSplitingId(null);
         }
     };
 
