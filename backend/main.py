@@ -858,8 +858,40 @@ def download_via_piped_proxy(video_id: str, output_path: Path) -> None:
         raise RuntimeError(f"All Piped proxy download attempts failed. Last error: {last_error}")
 
 
+def download_via_ytdlp_stream(youtube_url: str, output_path: Path, job_id: str) -> None:
+    """Extract direct audio stream URL with yt-dlp and stream directly via FFmpeg."""
+    cmd_url = [
+        "yt-dlp",
+        "--no-playlist",
+        "-g",
+        "-f", "bestaudio/best",
+        "--extractor-args", "youtube:player_client=android,web",
+        youtube_url,
+    ]
+    log.info("[job:%s] Extracting stream URL via yt-dlp: %s", job_id, " ".join(cmd_url))
+    proc_url = run_subprocess_killable(cmd_url, job_id)
+    stream_url = proc_url.stdout.strip().split('\n')[0] if proc_url.stdout else ""
+    if not stream_url or not stream_url.startswith("http"):
+        raise RuntimeError("yt-dlp failed to extract stream URL")
+
+    log.info("[job:%s] Direct stream URL extracted. Streaming audio with FFmpeg...", job_id)
+    cmd_ffmpeg = [
+        "ffmpeg", "-y",
+        "-i", stream_url,
+        "-vn",
+        "-ac", "2",
+        "-ar", "44100",
+        "-b:a", "192k",
+        str(output_path),
+    ]
+    run_subprocess_killable(cmd_ffmpeg, job_id)
+    if not output_path.exists() or output_path.stat().st_size < 100 * 1024:
+        raise RuntimeError("FFmpeg stream download produced invalid or empty file")
+    log.info("[job:%s] Direct stream download complete! (%.2f MB)", job_id, output_path.stat().st_size / 1024 / 1024)
+
+
 async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -> None:
-    """Download YouTube audio using Cobalt, Piped, Invidious, or yt-dlp fallback, then run Demucs."""
+    """Download YouTube audio using direct stream extraction, Cobalt, Piped, Invidious, or yt-dlp fallback, then run Demucs."""
     input_path = PROJECT_ROOT / f"{job_id}.mp3"
     try:
         JOB_STATUS[job_id]["status"] = "processing"
@@ -868,16 +900,26 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
         video_id = extract_youtube_video_id(youtube_url)
         download_succeeded = False
 
-        # 1. Try Cobalt API proxy downloader first (best quality, high stability)
+        # Tier 1: Try fast 2-step direct stream extraction (yt-dlp -g + FFmpeg)
         try:
-            JOB_STATUS[job_id]["message"] = "Downloading audio (trying Cobalt proxy)..."
-            log.info("[job:%s] Attempting Cobalt proxy download for URL: %s", job_id, youtube_url)
-            await asyncio.to_thread(download_via_cobalt_proxy, youtube_url, input_path)
+            JOB_STATUS[job_id]["message"] = "Extracting direct audio stream..."
+            log.info("[job:%s] Attempting 2-step direct stream download for URL: %s", job_id, youtube_url)
+            await asyncio.to_thread(download_via_ytdlp_stream, youtube_url, input_path, job_id)
             download_succeeded = True
-        except Exception as cob_err:
-            log.warning("[job:%s] Cobalt proxy download failed: %s", job_id, cob_err)
+        except Exception as stream_err:
+            log.warning("[job:%s] Direct stream extraction failed: %s. Trying Cobalt proxy...", job_id, stream_err)
 
-        # 2. Try Piped API proxy
+        # Tier 2: Try Cobalt API proxy downloader
+        if not download_succeeded:
+            try:
+                JOB_STATUS[job_id]["message"] = "Downloading audio (trying Cobalt proxy)..."
+                log.info("[job:%s] Attempting Cobalt proxy download for URL: %s", job_id, youtube_url)
+                await asyncio.to_thread(download_via_cobalt_proxy, youtube_url, input_path)
+                download_succeeded = True
+            except Exception as cob_err:
+                log.warning("[job:%s] Cobalt proxy download failed: %s", job_id, cob_err)
+
+        # Tier 3: Try Piped API proxy
         if not download_succeeded:
             try:
                 JOB_STATUS[job_id]["message"] = "Downloading audio (trying Piped proxy)..."
@@ -887,7 +929,7 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
             except Exception as piped_err:
                 log.warning("[job:%s] Piped proxy download failed: %s", job_id, piped_err)
 
-        # 3. Try Invidious proxy
+        # Tier 4: Try Invidious proxy
         if not download_succeeded:
             try:
                 JOB_STATUS[job_id]["message"] = "Downloading audio (trying Invidious proxy)..."
@@ -897,7 +939,7 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
             except Exception as inv_err:
                 log.warning("[job:%s] Invidious proxy download failed: %s", job_id, inv_err)
 
-        # 4. Fallback: yt-dlp with datacenter-friendly arguments
+        # Tier 5: Fallback: full yt-dlp with android client
         if not download_succeeded:
             try:
                 JOB_STATUS[job_id]["message"] = "Downloading audio (trying direct download)..."
@@ -908,7 +950,7 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                     "-x",                          # extract audio
                     "--audio-format", "mp3",
                     "--audio-quality", "0",
-                    "--extractor-args", "youtube:player_client=default,-android_sdkless",
+                    "--extractor-args", "youtube:player_client=android,web",
                     "--no-check-certificates",
                     "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                     "-o", output_template,
@@ -936,11 +978,11 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                 log.error("[job:%s] yt-dlp fallback also failed: %s", job_id, ytdlp_err)
 
         if not download_succeeded:
-            raise RuntimeError("All download methods failed (Cobalt, Piped, Invidious, yt-dlp)")
+            raise RuntimeError("All download methods failed (Direct Stream, Cobalt, Piped, Invidious, yt-dlp)")
 
         log.info("[job:%s] Download complete. File: %s (%.2f MB)", job_id, input_path.name, input_path.stat().st_size / 1024 / 1024)
 
-        # 5. Delegate to process_job for Demucs splitting
+        # 6. Delegate to process_job for Demucs splitting
         await process_job(job_id, input_path)
 
     except Exception as exc:
@@ -958,4 +1000,5 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
 
 if FRONTEND_DIST.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
+
 
