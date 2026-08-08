@@ -42,15 +42,8 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── App setup ──────────────────────────────────────────────────────────────────
-from dotenv import load_dotenv
-
 app = FastAPI()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-# Load local .env files if present (backend/.env and project root .env)
-load_dotenv(Path(__file__).parent / ".env")
-load_dotenv(PROJECT_ROOT / ".env")
-
 OUTPUT_FOLDER = PROJECT_ROOT / "demucs_output"
 FRONTEND_DIST = PROJECT_ROOT / "audio-splice-studio" / "dist"
 MODEL = os.getenv("DEMUCS_MODEL", "htdemucs")
@@ -196,19 +189,15 @@ async def get_audio_file(model_name: str, job_id: str, filename: str, request: R
 # ── Helpers ────────────────────────────────────────────────────────────────────
 ACTIVE_PROCESSES: dict[str, subprocess.Popen] = {}
 
-def run_subprocess_killable(cmd: list[str], job_id: str, timeout: float | None = None) -> subprocess.CompletedProcess:
+def run_subprocess_killable(cmd: list[str], job_id: str) -> subprocess.CompletedProcess:
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     ACTIVE_PROCESSES[job_id] = proc
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        stdout, stderr = proc.communicate()
         retcode = proc.poll()
         if retcode:
             raise subprocess.CalledProcessError(retcode, cmd, output=stdout, stderr=stderr)
         return subprocess.CompletedProcess(cmd, retcode, stdout, stderr)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        raise TimeoutError(f"Subprocess timed out after {timeout} seconds: {' '.join(cmd)}")
     finally:
         ACTIVE_PROCESSES.pop(job_id, None)
 
@@ -421,7 +410,7 @@ async def manual_cleanup():
 # ── YouTube Feature ────────────────────────────────────────────────────────────
 import httpx
 
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "AIzaSyDpSx9c1thanBoyHW8CCex1E5ai2Mmy7yg")
 YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 
@@ -431,9 +420,6 @@ async def youtube_search(q: str, maxResults: int = 8):
     """Search YouTube for songs and return results with thumbnails and metadata."""
     if not q.strip():
         raise HTTPException(status_code=400, detail="Query is required")
-
-    if not YOUTUBE_API_KEY:
-        raise HTTPException(status_code=500, detail="YouTube API Key is not configured on the server.")
 
     params = {
         "part": "snippet",
@@ -533,7 +519,6 @@ def extract_youtube_video_id(url: str) -> str:
 def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
     """Download audio from YouTube via public Cobalt instances from cobalt.directory."""
     import urllib.request as _urllib_request
-    import urllib.error as _urllib_error
     import json as _json
     import shutil as _shutil
 
@@ -567,22 +552,14 @@ def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
         "https://dog.kittycat.boo",
         "https://fox.kittycat.boo"
     ]
-    
-    # Prioritize static fallbacks (especially known working ones) at the beginning
-    all_instances = []
     for fallback in static_fallbacks:
-        if fallback not in all_instances:
-            all_instances.append(fallback)
-    for inst in instances:
-        if inst not in all_instances:
-            all_instances.append(inst)
-    instances = all_instances
+        if fallback not in instances:
+            instances.append(fallback)
 
     success = False
     last_error = None
 
-    # Limit to trying at most 10 instances to prevent extremely long timeouts
-    for api_url in instances[:10]:
+    for api_url in instances:
         log.info("Trying Cobalt instance for audio download: %s", api_url)
         success_inst = False
         for version in ("v10", "v7"):
@@ -611,7 +588,7 @@ def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
                     },
                     method='POST'
                 )
-                with _urllib_request.urlopen(req, timeout=4) as response:
+                with _urllib_request.urlopen(req, timeout=12) as response:
                     res_data = _json.loads(response.read().decode('utf-8'))
                     
                     # If the instance returned an error status in JSON
@@ -628,7 +605,7 @@ def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
                     # Stream the download to local disk
                     download_req = _urllib_request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
                     start_time = time.time()
-                    with _urllib_request.urlopen(download_req, timeout=8) as download_res:
+                    with _urllib_request.urlopen(download_req, timeout=10) as download_res:
                         # Verify HTTP response code
                         if download_res.status != 200:
                             raise RuntimeError(f"Download stream returned status code {download_res.status}")
@@ -654,16 +631,6 @@ def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
                 last_error = e
                 if output_path.exists():
                     output_path.unlink()
-                
-                # Check for JWT / auth missing error in response body to fail fast
-                if isinstance(e, _urllib_error.HTTPError):
-                    try:
-                        err_body = e.read().decode('utf-8', errors='ignore')
-                        if any(token in err_body for token in ("jwt", "auth", "api_key", "key")):
-                            log.info("Cobalt instance %s requires auth/JWT. Skipping all versions.", api_url)
-                            break  # Break the version loop, proceed to next instance
-                    except Exception:
-                        pass
         
         if success_inst:
             success = True
@@ -713,16 +680,16 @@ def download_via_invidious_proxy(video_id: str, output_path: Path) -> None:
         if fallback not in instance_urls:
             instance_urls.append(fallback)
 
-    # Try downloading from top instances (limit to 5 to avoid long hangs)
+    # Try downloading from top instances
     success = False
     last_error = None
     
-    for instance in instance_urls[:5]:
+    for instance in instance_urls[:15]:
         url = f"{instance}/api/v1/videos/{video_id}"
         log.info("Trying Invidious API instance: %s", url)
         try:
             req = _urllib_request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with _urllib_request.urlopen(req, timeout=3) as response:
+            with _urllib_request.urlopen(req, timeout=8) as response:
                 data = _json.loads(response.read().decode('utf-8'))
                 
                 # Try adaptive formats (usually contains audio only streams)
@@ -752,7 +719,7 @@ def download_via_invidious_proxy(video_id: str, output_path: Path) -> None:
                     # Stream the download to local disk
                     download_req = _urllib_request.Request(stream_url, headers={"User-Agent": "Mozilla/5.0"})
                     start_time = time.time()
-                    with _urllib_request.urlopen(download_req, timeout=5) as download_res:
+                    with _urllib_request.urlopen(download_req, timeout=10) as download_res:
                         with open(output_path, "wb") as f:
                             while True:
                                 if time.time() - start_time > 30:
@@ -779,232 +746,90 @@ def download_via_invidious_proxy(video_id: str, output_path: Path) -> None:
         raise RuntimeError(f"All Invidious proxy download attempts failed. Last error: {last_error}")
 
 
-def download_via_piped_proxy(video_id: str, output_path: Path) -> None:
-    """Download audio from YouTube via public Piped API instances."""
-    import urllib.request as _urllib_request
-    import json as _json
-
-    # 1. Fetch active Piped API instances
-    try:
-        req = _urllib_request.Request(
-            "https://piped-instances.kavin.rocks/",
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
-        with _urllib_request.urlopen(req, timeout=5) as response:
-            instances_data = _json.loads(response.read().decode('utf-8'))
-            # Sort by uptime (highest first) and filter healthy instances
-            instances_data.sort(key=lambda x: x.get('uptime_24h', 0), reverse=True)
-            instance_urls = [inst['api_url'].rstrip('/') for inst in instances_data
-                           if inst.get('api_url') and inst.get('uptime_24h', 0) > 50]
-    except Exception as e:
-        log.warning("Failed to fetch Piped instances list: %s", e)
-        instance_urls = []
-
-    # Static fallbacks
-    static_fallbacks = [
-        "https://api.piped.private.coffee",
-        "https://pipedapi.kavin.rocks",
-        "https://pipedapi.adminforge.de",
-        "https://api.piped.projectsegfau.lt",
-    ]
-    for fallback in static_fallbacks:
-        if fallback not in instance_urls:
-            instance_urls.append(fallback)
-
-    success = False
-    last_error = None
-
-    for instance in instance_urls[:5]:
-        url = f"{instance}/streams/{video_id}"
-        log.info("Trying Piped API instance: %s", url)
-        try:
-            req = _urllib_request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with _urllib_request.urlopen(req, timeout=5) as response:
-                data = _json.loads(response.read().decode('utf-8'))
-
-                audio_streams = data.get('audioStreams', [])
-                if not audio_streams:
-                    raise RuntimeError("No audio streams returned by Piped instance")
-
-                # Sort by bitrate descending for best quality
-                audio_streams.sort(key=lambda x: int(x.get('bitrate', 0)), reverse=True)
-                stream_url = audio_streams[0].get('url')
-                if not stream_url:
-                    raise RuntimeError("Audio stream has no URL")
-
-                log.info("Downloading Piped audio stream: %s", stream_url[:120])
-
-                download_req = _urllib_request.Request(stream_url, headers={"User-Agent": "Mozilla/5.0"})
-                start_time = time.time()
-                with _urllib_request.urlopen(download_req, timeout=8) as download_res:
-                    with open(output_path, "wb") as f:
-                        while True:
-                            if time.time() - start_time > 45:
-                                raise TimeoutError("Piped download stream timed out (exceeded 45 seconds)")
-                            chunk = download_res.read(16384)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-
-                if output_path.exists() and output_path.stat().st_size > 100 * 1024:
-                    log.info("Successfully downloaded YouTube audio using Piped instance (%s)", instance)
-                    success = True
-                    break
-                else:
-                    raise RuntimeError("Downloaded file is empty or too small")
-        except Exception as e:
-            log.warning("Piped proxy download failed for instance %s: %s", instance, e)
-            last_error = e
-            if output_path.exists():
-                output_path.unlink()
-
-    if not success:
-        raise RuntimeError(f"All Piped proxy download attempts failed. Last error: {last_error}")
-
-
-def download_via_ytdlp_stream(youtube_url: str, output_path: Path, job_id: str) -> None:
-    """Extract direct audio stream URL with python -m yt_dlp using mweb client + Mobile headers, then stream via FFmpeg."""
-    cmd_url = [
-        sys.executable, "-m", "yt_dlp",
-        "--no-playlist",
-        "--force-ipv4",
-        "--socket-timeout", "10",
-        "--no-warnings",
-        "-g",
-        "-f", "bestaudio/best",
-        "--extractor-args", "youtube:player_client=mweb,android",
-        "--user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
-        "--referer", "https://www.youtube.com/",
-        "--add-header", "Accept-Language: en-US,en;q=0.9",
-        youtube_url,
-    ]
-    log.info("[job:%s] Extracting stream URL via yt-dlp (mweb): %s", job_id, " ".join(cmd_url))
-    proc_url = run_subprocess_killable(cmd_url, job_id, timeout=20)
-    stream_url = proc_url.stdout.strip().split('\n')[0] if proc_url.stdout else ""
-    if not stream_url or not stream_url.startswith("http"):
-        raise RuntimeError("yt-dlp mweb failed to extract stream URL")
-
-    log.info("[job:%s] Direct stream URL extracted. Streaming audio with FFmpeg...", job_id)
-    cmd_ffmpeg = [
-        "ffmpeg", "-y",
-        "-headers", "User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15\r\nReferer: https://www.youtube.com/\r\n",
-        "-i", stream_url,
-        "-vn",
-        "-ac", "2",
-        "-ar", "44100",
-        "-b:a", "192k",
-        str(output_path),
-    ]
-    run_subprocess_killable(cmd_ffmpeg, job_id, timeout=30)
-    if not output_path.exists() or output_path.stat().st_size < 100 * 1024:
-        raise RuntimeError("FFmpeg stream download produced invalid or empty file")
-    log.info("[job:%s] Direct stream download complete! (%.2f MB)", job_id, output_path.stat().st_size / 1024 / 1024)
-
-
 async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -> None:
-    """Download YouTube audio using direct stream extraction, Cobalt, Piped, Invidious, or yt-dlp fallback, then run Demucs."""
+    """Download YouTube audio using Cobalt proxy, Invidious proxy, or local yt-dlp fallback, then run Demucs."""
     input_path = PROJECT_ROOT / f"{job_id}.mp3"
     try:
         JOB_STATUS[job_id]["status"] = "processing"
         JOB_STATUS[job_id]["message"] = "Downloading audio from YouTube..."
 
-        video_id = extract_youtube_video_id(youtube_url)
-        download_succeeded = False
-
-        # Tier 1: Try fast 2-step direct stream extraction (yt-dlp -g + FFmpeg)
+        # 1. Try Cobalt API proxy downloader first (best quality, high stability)
         try:
-            JOB_STATUS[job_id]["message"] = "Extracting direct audio stream..."
-            log.info("[job:%s] Attempting 2-step direct stream download for URL: %s", job_id, youtube_url)
-            await asyncio.to_thread(download_via_ytdlp_stream, youtube_url, input_path, job_id)
-            download_succeeded = True
-        except Exception as stream_err:
-            log.warning("[job:%s] Direct stream extraction failed: %s. Trying Cobalt proxy...", job_id, stream_err)
-
-        # Tier 2: Try Cobalt API proxy downloader
-        if not download_succeeded:
+            log.info("[job:%s] Attempting Cobalt proxy download for URL: %s", job_id, youtube_url)
+            await asyncio.to_thread(download_via_cobalt_proxy, youtube_url, input_path)
+        except Exception as cob_err:
+            log.warning("[job:%s] Cobalt proxy download failed: %s. Trying Invidious proxy...", job_id, cob_err)
+            
+            # 2. Extract video ID and try Invidious proxy downloader second
             try:
-                JOB_STATUS[job_id]["message"] = "Downloading audio (trying Cobalt proxy)..."
-                log.info("[job:%s] Attempting Cobalt proxy download for URL: %s", job_id, youtube_url)
-                await asyncio.to_thread(download_via_cobalt_proxy, youtube_url, input_path)
-                download_succeeded = True
-            except Exception as cob_err:
-                log.warning("[job:%s] Cobalt proxy download failed: %s", job_id, cob_err)
-
-        # Tier 3: Try Piped API proxy
-        if not download_succeeded:
-            try:
-                JOB_STATUS[job_id]["message"] = "Downloading audio (trying Piped proxy)..."
-                log.info("[job:%s] Attempting Piped proxy download for video: %s", job_id, video_id)
-                await asyncio.to_thread(download_via_piped_proxy, video_id, input_path)
-                download_succeeded = True
-            except Exception as piped_err:
-                log.warning("[job:%s] Piped proxy download failed: %s", job_id, piped_err)
-
-        # Tier 4: Try Invidious proxy
-        if not download_succeeded:
-            try:
-                JOB_STATUS[job_id]["message"] = "Downloading audio (trying Invidious proxy)..."
+                video_id = extract_youtube_video_id(youtube_url)
                 log.info("[job:%s] Attempting Invidious proxy download for video: %s", job_id, video_id)
                 await asyncio.to_thread(download_via_invidious_proxy, video_id, input_path)
-                download_succeeded = True
             except Exception as inv_err:
-                log.warning("[job:%s] Invidious proxy download failed: %s", job_id, inv_err)
-
-        # Tier 5: Fallback: full yt-dlp with mweb client + mobile headers
-        if not download_succeeded:
-            try:
-                JOB_STATUS[job_id]["message"] = "Downloading audio (trying direct download)..."
+                log.warning("[job:%s] Invidious proxy download failed: %s. Falling back to yt-dlp...", job_id, inv_err)
+                
+                # 3. Fallback: yt-dlp
+                # YouTube aggressively bot-flags datacenter IPs (AWS/GCP/Fly.io/HF Spaces),
+                # which is the #1 reason this works locally (residential IP) but fails in
+                # production with "Sign in to confirm you're not a bot". We work around it by:
+                #   a) optionally passing a cookies.txt (exported from a real logged-in
+                #      browser session) if COOKIES_FILE points to one, and
+                #   b) trying a couple of alternate "player clients" (android/ios), which
+                #      are frequently exempt from the web-client bot check.
                 output_template = str(PROJECT_ROOT / f"{job_id}.%(ext)s")
-                cmd = [
+                cookies_file = os.getenv("YOUTUBE_COOKIES_FILE", "").strip()
+                base_cmd = [
                     sys.executable, "-m", "yt_dlp",
                     "--no-playlist",
-                    "--force-ipv4",
-                    "--socket-timeout", "10",
                     "-x",                          # extract audio
                     "--audio-format", "mp3",
                     "--audio-quality", "0",
-                    "--extractor-args", "youtube:player_client=mweb,android",
-                    "--no-check-certificates",
-                    "--user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
-                    "--referer", "https://www.youtube.com/",
-                    "--add-header", "Accept-Language: en-US,en;q=0.9",
                     "-o", output_template,
-                    youtube_url,
                 ]
-                log.info("[job:%s] Running yt-dlp fallback: %s", job_id, " ".join(cmd))
-                result = await asyncio.to_thread(
-                    run_subprocess_killable, cmd, job_id, 30
-                )
-                log.info("[job:%s] yt-dlp output: %s", job_id, result.stdout[:200] if result.stdout else "")
+                if cookies_file and Path(cookies_file).exists():
+                    base_cmd += ["--cookies", cookies_file]
+
+                player_clients = ["android", "ios", "web"]
+                last_yt_dlp_error = None
+                result = None
+                for client in player_clients:
+                    cmd = base_cmd + ["--extractor-args", f"youtube:player_client={client}", youtube_url]
+                    log.info("[job:%s] Running yt-dlp fallback (player_client=%s): %s", job_id, client, " ".join(cmd))
+                    try:
+                        result = await asyncio.to_thread(run_subprocess_killable, cmd, job_id)
+                        log.info("[job:%s] yt-dlp output: %s", job_id, result.stdout[:200])
+                        break
+                    except subprocess.CalledProcessError as e:
+                        last_yt_dlp_error = e
+                        stderr = (e.stderr or "")
+                        log.warning("[job:%s] yt-dlp (player_client=%s) failed: %s", job_id, client, stderr[-300:])
+                        # If it's not a bot-check error, retrying with another client won't help
+                        if "not a bot" not in stderr.lower() and "sign in" not in stderr.lower():
+                            raise
+                else:
+                    raise last_yt_dlp_error
 
                 # Resolve the downloaded file path
                 files = list(PROJECT_ROOT.glob(f"{job_id}.*"))
                 if not files:
                     raise RuntimeError("yt-dlp fallback finished but file not found on disk")
-
+                
                 # If it's not .mp3, rename it to .mp3 so demucs can process it easily
                 if files[0].suffix.lower() != ".mp3":
                     files[0].rename(input_path)
                 else:
                     input_path = files[0]
 
-                download_succeeded = True
-            except Exception as ytdlp_err:
-                log.error("[job:%s] yt-dlp fallback also failed: %s", job_id, ytdlp_err)
-
-        if not download_succeeded:
-            raise RuntimeError("All download methods failed (Direct Stream, Cobalt, Piped, Invidious, yt-dlp)")
-
         log.info("[job:%s] Download complete. File: %s (%.2f MB)", job_id, input_path.name, input_path.stat().st_size / 1024 / 1024)
 
-        # 6. Delegate to process_job for Demucs splitting
+        # 4. Delegate to process_job for Demucs splitting
         await process_job(job_id, input_path)
 
     except Exception as exc:
         log.error("[job:%s] YouTube job failed: %s", job_id, exc, exc_info=True)
         JOB_STATUS[job_id].update({
             "status": "failed",
-            "message": f"Error: {str(exc)}",
+            "message": "We encountered an error while downloading or processing the YouTube audio. Please try another song or URL.",
             "finishedAt": time.time(),
         })
         if input_path and input_path.exists():
@@ -1015,5 +840,3 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
 
 if FRONTEND_DIST.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
-
-

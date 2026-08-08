@@ -18,7 +18,3 @@ __pycache__/
 .agents/
 *.zip
 *.mjs
-.env
-*.env
-backend/.env
-
