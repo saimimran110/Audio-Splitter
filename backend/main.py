@@ -788,6 +788,10 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                                                     # which manifests as SSL EOF errors
                     "--retries", "3",
                     "--socket-timeout", "20",
+                    "--impersonate", "chrome",      # spoof a real Chrome TLS/JA3 fingerprint via
+                                                    # curl_cffi; Python's default TLS handshake is
+                                                    # what's triggering YouTube's edge to reset the
+                                                    # connection (seen as SSL EOF) on cloud hosts
                     "-o", output_template,
                 ]
                 if cookies_file and Path(cookies_file).exists():
