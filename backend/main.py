@@ -519,6 +519,7 @@ def extract_youtube_video_id(url: str) -> str:
 def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
     """Download audio from YouTube via public Cobalt instances from cobalt.directory."""
     import urllib.request as _urllib_request
+    import urllib.error as _urllib_error
     import json as _json
     import shutil as _shutil
 
@@ -552,14 +553,22 @@ def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
         "https://dog.kittycat.boo",
         "https://fox.kittycat.boo"
     ]
+    
+    # Prioritize static fallbacks (especially known working ones) at the beginning
+    all_instances = []
     for fallback in static_fallbacks:
-        if fallback not in instances:
-            instances.append(fallback)
+        if fallback not in all_instances:
+            all_instances.append(fallback)
+    for inst in instances:
+        if inst not in all_instances:
+            all_instances.append(inst)
+    instances = all_instances
 
     success = False
     last_error = None
 
-    for api_url in instances:
+    # Limit to trying at most 10 instances to prevent extremely long timeouts
+    for api_url in instances[:10]:
         log.info("Trying Cobalt instance for audio download: %s", api_url)
         success_inst = False
         for version in ("v10", "v7"):
@@ -588,7 +597,7 @@ def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
                     },
                     method='POST'
                 )
-                with _urllib_request.urlopen(req, timeout=12) as response:
+                with _urllib_request.urlopen(req, timeout=4) as response:
                     res_data = _json.loads(response.read().decode('utf-8'))
                     
                     # If the instance returned an error status in JSON
@@ -605,7 +614,7 @@ def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
                     # Stream the download to local disk
                     download_req = _urllib_request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
                     start_time = time.time()
-                    with _urllib_request.urlopen(download_req, timeout=10) as download_res:
+                    with _urllib_request.urlopen(download_req, timeout=8) as download_res:
                         # Verify HTTP response code
                         if download_res.status != 200:
                             raise RuntimeError(f"Download stream returned status code {download_res.status}")
@@ -631,6 +640,16 @@ def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
                 last_error = e
                 if output_path.exists():
                     output_path.unlink()
+                
+                # Check for JWT / auth missing error in response body to fail fast
+                if isinstance(e, _urllib_error.HTTPError):
+                    try:
+                        err_body = e.read().decode('utf-8', errors='ignore')
+                        if any(token in err_body for token in ("jwt", "auth", "api_key", "key")):
+                            log.info("Cobalt instance %s requires auth/JWT. Skipping all versions.", api_url)
+                            break  # Break the version loop, proceed to next instance
+                    except Exception:
+                        pass
         
         if success_inst:
             success = True
@@ -680,16 +699,16 @@ def download_via_invidious_proxy(video_id: str, output_path: Path) -> None:
         if fallback not in instance_urls:
             instance_urls.append(fallback)
 
-    # Try downloading from top instances
+    # Try downloading from top instances (limit to 5 to avoid long hangs)
     success = False
     last_error = None
     
-    for instance in instance_urls[:15]:
+    for instance in instance_urls[:5]:
         url = f"{instance}/api/v1/videos/{video_id}"
         log.info("Trying Invidious API instance: %s", url)
         try:
             req = _urllib_request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with _urllib_request.urlopen(req, timeout=8) as response:
+            with _urllib_request.urlopen(req, timeout=3) as response:
                 data = _json.loads(response.read().decode('utf-8'))
                 
                 # Try adaptive formats (usually contains audio only streams)
@@ -719,7 +738,7 @@ def download_via_invidious_proxy(video_id: str, output_path: Path) -> None:
                     # Stream the download to local disk
                     download_req = _urllib_request.Request(stream_url, headers={"User-Agent": "Mozilla/5.0"})
                     start_time = time.time()
-                    with _urllib_request.urlopen(download_req, timeout=10) as download_res:
+                    with _urllib_request.urlopen(download_req, timeout=5) as download_res:
                         with open(output_path, "wb") as f:
                             while True:
                                 if time.time() - start_time > 30:
