@@ -784,11 +784,18 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                     "-x",                          # extract audio
                     "--audio-format", "mp3",
                     "--audio-quality", "0",
+                    "--force-ipv4",                # containers often have broken/misrouted IPv6,
+                                                    # which manifests as SSL EOF errors
+                    "--retries", "3",
+                    "--socket-timeout", "20",
                     "-o", output_template,
                 ]
                 if cookies_file and Path(cookies_file).exists():
                     base_cmd += ["--cookies", cookies_file]
 
+                # Try every player client regardless of *why* the previous one failed
+                # (bot-check, SSL EOF, timeout, etc). Different clients hit different
+                # YouTube endpoints, so one being flaky/blocked doesn't mean the others will be.
                 player_clients = ["android", "ios", "web"]
                 last_yt_dlp_error = None
                 result = None
@@ -803,9 +810,6 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                         last_yt_dlp_error = e
                         stderr = (e.stderr or "")
                         log.warning("[job:%s] yt-dlp (player_client=%s) failed: %s", job_id, client, stderr[-300:])
-                        # If it's not a bot-check error, retrying with another client won't help
-                        if "not a bot" not in stderr.lower() and "sign in" not in stderr.lower():
-                            raise
                 else:
                     raise last_yt_dlp_error
 
