@@ -68,6 +68,7 @@ export const splitAudio = async (
   const POLL_INTERVAL_MS = 4000;
   const MAX_WAIT_MS = 15 * 60 * 1000; // 15 minutes absolute ceiling
   const started = Date.now();
+  let consecutiveErrors = 0;
 
   while (Date.now() - started < MAX_WAIT_MS) {
     if (isCancelled?.()) throw new Error('Cancelled');
@@ -78,8 +79,16 @@ export const splitAudio = async (
     try {
       const res = await apiClient.get<JobStatus>(`/jobs/${jobId}`);
       job = res.data;
+      consecutiveErrors = 0;
     } catch (err) {
-      // Network blip — keep polling
+      consecutiveErrors++;
+      if (axios.isAxiosError(err) && err.response?.status === 404) {
+        if (consecutiveErrors >= 3) {
+          throw new Error('Job session expired or restarted. Please try splitting the song again.');
+        }
+      } else if (consecutiveErrors >= 8) {
+        throw new Error('Lost connection to processing server. Please check your internet connection and try again.');
+      }
       onProgress?.('Checking status...');
       continue;
     }
@@ -187,6 +196,7 @@ export const pollJob = async (
   const POLL_INTERVAL_MS = 4000;
   const MAX_WAIT_MS = 15 * 60 * 1000;
   const started = Date.now();
+  let consecutiveErrors = 0;
 
   while (Date.now() - started < MAX_WAIT_MS) {
     if (isCancelled?.()) throw new Error('Cancelled');
@@ -197,7 +207,16 @@ export const pollJob = async (
     try {
       const res = await apiClient.get<JobStatus>(`/jobs/${jobId}`);
       job = res.data;
-    } catch {
+      consecutiveErrors = 0;
+    } catch (err) {
+      consecutiveErrors++;
+      if (axios.isAxiosError(err) && err.response?.status === 404) {
+        if (consecutiveErrors >= 3) {
+          throw new Error('Job session expired or restarted. Please try splitting the song again.');
+        }
+      } else if (consecutiveErrors >= 8) {
+        throw new Error('Lost connection to processing server. Please check your internet connection and try again.');
+      }
       onProgress?.('Checking status...');
       continue;
     }

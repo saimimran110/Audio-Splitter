@@ -61,8 +61,30 @@ if cookies_data:
     except Exception as e:
         log.warning("Failed to write YouTube cookies file from environment secret: %s", e)
 
-# In-memory job store  {job_id: {...}}
+# File-backed job store to survive container restarts
+JOBS_FILE = PROJECT_ROOT / "jobs.json"
 JOB_STATUS: dict[str, dict[str, Any]] = {}
+
+def save_jobs():
+    try:
+        import json as _json
+        JOBS_FILE.write_text(_json.dumps(JOB_STATUS), encoding="utf-8")
+    except Exception as e:
+        log.warning("Failed to persist jobs.json: %s", e)
+
+def load_jobs():
+    global JOB_STATUS
+    if JOBS_FILE.exists():
+        try:
+            import json as _json
+            data = _json.loads(JOBS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                JOB_STATUS = data
+                log.info("Loaded %d jobs from jobs.json", len(JOB_STATUS))
+        except Exception as e:
+            log.warning("Failed to load jobs.json: %s", e)
+
+load_jobs()
 
 allowed_origins = [
     origin.strip()
@@ -390,6 +412,17 @@ async def split_song(file: UploadFile = File(...)):
 async def get_job(job_id: str):
     job = JOB_STATUS.get(job_id)
     if not job:
+        job_dir = OUTPUT_FOLDER / job_id
+        vocals_file = job_dir / "vocals.mp3"
+        karaoke_file = job_dir / "no_vocals.mp3"
+        if vocals_file.exists() and karaoke_file.exists():
+            return {
+                "jobId": job_id,
+                "status": "completed",
+                "message": "Separation completed",
+                "vocals": f"/files/{job_id}/vocals.mp3",
+                "karaoke": f"/files/{job_id}/no_vocals.mp3",
+            }
         raise HTTPException(status_code=404, detail="Job not found")
     return {"jobId": job_id, **job}
 
