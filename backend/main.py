@@ -50,6 +50,14 @@ MODEL = os.getenv("DEMUCS_MODEL", "htdemucs")
 ADSENSE_CLIENT_ID = os.getenv("ADSENSE_CLIENT_ID", "").strip()
 ADSENSE_SLOT_ID = os.getenv("ADSENSE_SLOT_ID", "").strip()
 
+try:
+    import curl_cffi  # type: ignore
+    HAS_CURL_CFFI = True
+    log.info("curl_cffi is installed; TLS impersonation enabled.")
+except ImportError:
+    HAS_CURL_CFFI = False
+    log.info("curl_cffi is not installed; TLS impersonation disabled.")
+
 # Auto-generate cookies.txt from Hugging Face secret if present
 COOKIES_PATH = PROJECT_ROOT / "cookies.txt"
 cookies_data = os.getenv("YOUTUBE_COOKIES_DATA", "").strip()
@@ -848,7 +856,10 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                 "--socket-timeout", "30",
                 "-o", output_template,
             ]
-            if cookies_file and Path(cookies_file).exists():
+            if HAS_CURL_CFFI:
+                base_cmd += ["--impersonate", "chrome"]
+
+            if cookies_file and Path(cookies_file).exists() and Path(cookies_file).stat().st_size > 50:
                 base_cmd += ["--cookies", cookies_file]
 
             player_clients = ["android", "ios", "web"]
