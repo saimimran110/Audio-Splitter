@@ -808,9 +808,11 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                 "-x",                          # extract audio
                 "--audio-format", "mp3",
                 "--audio-quality", "0",
-                "--force-ipv4",
-                "--retries", "3",
-                "--socket-timeout", "20",
+                "--force-ipv4",                # containers often have broken/misrouted IPv6
+                "--no-check-certificate",       # prevent OpenSSL choking on edge TLS resets
+                "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "--retries", "5",
+                "--socket-timeout", "30",
                 "-o", output_template,
             ]
             if cookies_file and Path(cookies_file).exists():
