@@ -860,13 +860,10 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
             if cf_proxy:
                 base_cmd += ["--proxy", cf_proxy]
 
-            if HAS_CURL_CFFI:
-                base_cmd += ["--impersonate", "chrome"]
-
             if cookies_file and Path(cookies_file).exists() and Path(cookies_file).stat().st_size > 50:
                 base_cmd += ["--cookies", cookies_file]
 
-            player_clients = ["android", "ios", "web"]
+            player_clients = ["mweb", "android", "ios", "web"]
             for client in player_clients:
                 cmd = base_cmd + ["--extractor-args", f"youtube:player_client={client}", youtube_url]
                 log.info("[job:%s] Running yt-dlp (player_client=%s): %s", job_id, client, " ".join(cmd))
