@@ -856,6 +856,10 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                 "--socket-timeout", "30",
                 "-o", output_template,
             ]
+            cf_proxy = os.getenv("CLOUDFLARE_PROXY_URL", "").strip()
+            if cf_proxy:
+                base_cmd += ["--proxy", cf_proxy]
+
             if HAS_CURL_CFFI:
                 base_cmd += ["--impersonate", "chrome"]
 
