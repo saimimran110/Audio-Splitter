@@ -601,7 +601,7 @@ def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
     success = False
     last_error = None
 
-    for api_url in instances:
+    for api_url in instances[:5]:
         log.info("Trying Cobalt instance for audio download: %s", api_url)
         success_inst = False
         for version in ("v10", "v7"):
@@ -630,7 +630,7 @@ def download_via_cobalt_proxy(video_url: str, output_path: Path) -> None:
                     },
                     method='POST'
                 )
-                with _urllib_request.urlopen(req, timeout=12) as response:
+                with _urllib_request.urlopen(req, timeout=4) as response:
                     res_data = _json.loads(response.read().decode('utf-8'))
                     
                     # If the instance returned an error status in JSON
@@ -789,86 +789,76 @@ def download_via_invidious_proxy(video_id: str, output_path: Path) -> None:
 
 
 async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -> None:
-    """Download YouTube audio using Cobalt proxy, Invidious proxy, or local yt-dlp fallback, then run Demucs."""
+    """Download YouTube audio using local yt-dlp first, then Cobalt proxy or Invidious proxy fallback, then run Demucs."""
     input_path = PROJECT_ROOT / f"{job_id}.mp3"
     try:
         JOB_STATUS[job_id]["status"] = "processing"
         JOB_STATUS[job_id]["message"] = "Downloading audio from YouTube..."
 
-        # 1. Try Cobalt API proxy downloader first (best quality, high stability)
+        download_success = False
+
+        # 1. Try yt-dlp first (extremely fast & reliable on residential IPs / authenticated sessions)
         try:
-            log.info("[job:%s] Attempting Cobalt proxy download for URL: %s", job_id, youtube_url)
-            await asyncio.to_thread(download_via_cobalt_proxy, youtube_url, input_path)
-        except Exception as cob_err:
-            log.warning("[job:%s] Cobalt proxy download failed: %s. Trying Invidious proxy...", job_id, cob_err)
-            
-            # 2. Extract video ID and try Invidious proxy downloader second
+            log.info("[job:%s] Attempting direct yt-dlp download for URL: %s", job_id, youtube_url)
+            output_template = str(PROJECT_ROOT / f"{job_id}.%(ext)s")
+            cookies_file = os.getenv("YOUTUBE_COOKIES_FILE", "").strip()
+            base_cmd = [
+                "yt-dlp",
+                "--no-playlist",
+                "-x",                          # extract audio
+                "--audio-format", "mp3",
+                "--audio-quality", "0",
+                "--force-ipv4",
+                "--retries", "3",
+                "--socket-timeout", "20",
+                "-o", output_template,
+            ]
+            if cookies_file and Path(cookies_file).exists():
+                base_cmd += ["--cookies", cookies_file]
+
+            player_clients = ["android", "ios", "web"]
+            for client in player_clients:
+                cmd = base_cmd + ["--extractor-args", f"youtube:player_client={client}", youtube_url]
+                log.info("[job:%s] Running yt-dlp (player_client=%s): %s", job_id, client, " ".join(cmd))
+                try:
+                    result = await asyncio.to_thread(run_subprocess_killable, cmd, job_id)
+                    log.info("[job:%s] yt-dlp output: %s", job_id, result.stdout[:200])
+                    
+                    files = list(PROJECT_ROOT.glob(f"{job_id}.*"))
+                    if files:
+                        if files[0].suffix.lower() != ".mp3":
+                            files[0].rename(input_path)
+                        else:
+                            input_path = files[0]
+                        download_success = True
+                        break
+                except subprocess.CalledProcessError as e:
+                    stderr = (e.stderr or "")
+                    log.warning("[job:%s] yt-dlp (player_client=%s) failed: %s", job_id, client, stderr[-300:])
+        except Exception as yt_err:
+            log.warning("[job:%s] Direct yt-dlp download failed: %s", job_id, yt_err)
+
+        # 2. Try Cobalt API proxy downloader second if yt-dlp failed
+        if not download_success:
+            try:
+                log.info("[job:%s] Attempting Cobalt proxy fallback download for URL: %s", job_id, youtube_url)
+                await asyncio.to_thread(download_via_cobalt_proxy, youtube_url, input_path)
+                download_success = True
+            except Exception as cob_err:
+                log.warning("[job:%s] Cobalt proxy fallback failed: %s. Trying Invidious proxy...", job_id, cob_err)
+
+        # 3. Try Invidious proxy downloader third if Cobalt also failed
+        if not download_success:
             try:
                 video_id = extract_youtube_video_id(youtube_url)
-                log.info("[job:%s] Attempting Invidious proxy download for video: %s", job_id, video_id)
+                log.info("[job:%s] Attempting Invidious proxy fallback download for video: %s", job_id, video_id)
                 await asyncio.to_thread(download_via_invidious_proxy, video_id, input_path)
+                download_success = True
             except Exception as inv_err:
-                log.warning("[job:%s] Invidious proxy download failed: %s. Falling back to yt-dlp...", job_id, inv_err)
-                
-                # 3. Fallback: yt-dlp
-                # YouTube aggressively bot-flags datacenter IPs (AWS/GCP/Fly.io/HF Spaces),
-                # which is the #1 reason this works locally (residential IP) but fails in
-                # production with "Sign in to confirm you're not a bot". We work around it by:
-                #   a) optionally passing a cookies.txt (exported from a real logged-in
-                #      browser session) if COOKIES_FILE points to one, and
-                #   b) trying a couple of alternate "player clients" (android/ios), which
-                #      are frequently exempt from the web-client bot check.
-                output_template = str(PROJECT_ROOT / f"{job_id}.%(ext)s")
-                cookies_file = os.getenv("YOUTUBE_COOKIES_FILE", "").strip()
-                base_cmd = [
-                    "yt-dlp",
-                    "--no-playlist",
-                    "-x",                          # extract audio
-                    "--audio-format", "mp3",
-                    "--audio-quality", "0",
-                    "--force-ipv4",                # containers often have broken/misrouted IPv6,
-                                                    # which manifests as SSL EOF errors
-                    "--retries", "3",
-                    "--socket-timeout", "20",
-                    "--impersonate", "chrome",      # spoof a real Chrome TLS/JA3 fingerprint via
-                                                    # curl_cffi; Python's default TLS handshake is
-                                                    # what's triggering YouTube's edge to reset the
-                                                    # connection (seen as SSL EOF) on cloud hosts
-                    "-o", output_template,
-                ]
-                if cookies_file and Path(cookies_file).exists():
-                    base_cmd += ["--cookies", cookies_file]
+                log.warning("[job:%s] Invidious proxy fallback failed: %s", job_id, inv_err)
 
-                # Try every player client regardless of *why* the previous one failed
-                # (bot-check, SSL EOF, timeout, etc). Different clients hit different
-                # YouTube endpoints, so one being flaky/blocked doesn't mean the others will be.
-                player_clients = ["android", "ios", "web"]
-                last_yt_dlp_error = None
-                result = None
-                for client in player_clients:
-                    cmd = base_cmd + ["--extractor-args", f"youtube:player_client={client}", youtube_url]
-                    log.info("[job:%s] Running yt-dlp fallback (player_client=%s): %s", job_id, client, " ".join(cmd))
-                    try:
-                        result = await asyncio.to_thread(run_subprocess_killable, cmd, job_id)
-                        log.info("[job:%s] yt-dlp output: %s", job_id, result.stdout[:200])
-                        break
-                    except subprocess.CalledProcessError as e:
-                        last_yt_dlp_error = e
-                        stderr = (e.stderr or "")
-                        log.warning("[job:%s] yt-dlp (player_client=%s) failed: %s", job_id, client, stderr[-300:])
-                else:
-                    raise last_yt_dlp_error
-
-                # Resolve the downloaded file path
-                files = list(PROJECT_ROOT.glob(f"{job_id}.*"))
-                if not files:
-                    raise RuntimeError("yt-dlp fallback finished but file not found on disk")
-                
-                # If it's not .mp3, rename it to .mp3 so demucs can process it easily
-                if files[0].suffix.lower() != ".mp3":
-                    files[0].rename(input_path)
-                else:
-                    input_path = files[0]
+        if not download_success or not input_path.exists() or input_path.stat().st_size == 0:
+            raise RuntimeError("All audio download attempts (yt-dlp, Cobalt proxy, Invidious proxy) failed.")
 
         log.info("[job:%s] Download complete. File: %s (%.2f MB)", job_id, input_path.name, input_path.stat().st_size / 1024 / 1024)
 
