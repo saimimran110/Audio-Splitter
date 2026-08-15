@@ -14,6 +14,9 @@ else:
 
 os.environ["TORCH_HOME"] = "/app/.cache/torch"
 os.environ["HF_HOME"] = "/app/.cache/hub"
+
+# Detect Hugging Face Spaces environment — used to skip fallbacks known to fail on datacenter IPs
+IS_HF_SPACE = os.path.exists("/app")
 import atexit
 import asyncio
 import logging
@@ -829,8 +832,91 @@ def download_via_invidious_proxy(video_id: str, output_path: Path) -> None:
         raise RuntimeError(f"All Invidious proxy download attempts failed. Last error: {last_error}")
 
 
+def download_via_piped_api(video_id: str, output_path: Path) -> None:
+    """Download YouTube audio via Piped public API instances.
+    
+    Piped fetches from YouTube on its own residential-backed servers, so this works
+    even from datacenter IPs like Hugging Face Spaces where direct yt-dlp fails.
+    Piped returns direct audio stream URLs which we pipe through ffmpeg to get an MP3.
+    """
+    import urllib.request as _urllib_request
+    import json as _json
+
+    piped_instances = [
+        "https://pipedapi.kavin.rocks",
+        "https://piped-api.garudalinux.org",
+        "https://api.piped.yt",
+        "https://piped-api.lunar.icu",
+        "https://piped.video/api",
+        "https://pipedapi.adminforge.de",
+        "https://piped-api.privacy.com.de",
+    ]
+
+    last_error = None
+
+    for instance in piped_instances:
+        url = f"{instance}/streams/{video_id}"
+        log.info("Trying Piped API instance: %s", url)
+        try:
+            req = _urllib_request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+            )
+            with _urllib_request.urlopen(req, timeout=10) as response:
+                data = _json.loads(response.read().decode("utf-8"))
+
+            # audioStreams is a list of dicts with {url, mimeType, bitrate, ...}
+            audio_streams = data.get("audioStreams", [])
+            if not audio_streams:
+                raise RuntimeError("No audioStreams in Piped API response")
+
+            # Pick highest bitrate audio stream
+            audio_streams.sort(key=lambda x: int(x.get("bitrate") or 0), reverse=True)
+            stream_url = audio_streams[0].get("url", "")
+            if not stream_url:
+                raise RuntimeError("No stream URL in best audio stream")
+
+            log.info("[Piped] Downloading stream via ffmpeg: %s...", stream_url[:100])
+
+            # Use ffmpeg to download the stream to MP3 — handles segmented/DASH streams too
+            cmd = [
+                "ffmpeg", "-y",
+                "-user_agent", "Mozilla/5.0",
+                "-i", stream_url,
+                "-vn",
+                "-codec:a", "libmp3lame",
+                "-b:a", "192k",
+                "-ac", "2",
+                str(output_path),
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                raise RuntimeError(f"ffmpeg failed: {result.stderr[-300:]}")
+
+            if output_path.exists() and output_path.stat().st_size > 100 * 1024:
+                log.info("[Piped] Successfully downloaded audio via %s (%.2f MB)",
+                         instance, output_path.stat().st_size / 1024 / 1024)
+                return  # success
+            else:
+                output_path.unlink(missing_ok=True)
+                raise RuntimeError("Downloaded file is empty or too small")
+
+        except Exception as e:
+            log.warning("[Piped] Instance %s failed: %s", instance, e)
+            last_error = e
+            output_path.unlink(missing_ok=True)
+
+    raise RuntimeError(f"All Piped API download attempts failed. Last error: {last_error}")
+
+
+
 async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -> None:
-    """Download YouTube audio using local yt-dlp first, then Cobalt proxy or Invidious proxy fallback, then run Demucs."""
+    """Download YouTube audio then run Demucs stem separation.
+
+    Download priority:
+      On Hugging Face: yt-dlp (tv_embedded/mediaconnect/mweb/ios) → Piped API → fail fast
+      On local dev:    yt-dlp → Piped API → Cobalt → Invidious
+    """
     input_path = PROJECT_ROOT / f"{job_id}.mp3"
     try:
         JOB_STATUS[job_id]["status"] = "processing"
@@ -838,7 +924,9 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
 
         download_success = False
 
-        # 1. Try yt-dlp first (extremely fast & reliable on residential IPs / authenticated sessions)
+        # ── 1. yt-dlp ──────────────────────────────────────────────────────────
+        # tv_embedded and mediaconnect player clients work better on datacenter IPs
+        # because they use simpler authentication flows not gated by IP reputation.
         try:
             log.info("[job:%s] Attempting direct yt-dlp download for URL: %s", job_id, youtube_url)
             output_template = str(PROJECT_ROOT / f"{job_id}.%(ext)s")
@@ -846,27 +934,36 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
             base_cmd = [
                 "yt-dlp",
                 "--no-playlist",
-                "-x",                          # extract audio
+                "-x",                    # extract audio only
                 "--audio-format", "mp3",
                 "--audio-quality", "0",
-                "--force-ipv4",                # containers often have broken/misrouted IPv6
-                "--no-check-certificate",       # prevent OpenSSL choking on edge TLS resets
-                "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                "--retries", "5",
-                "--socket-timeout", "30",
+                "--force-ipv4",
+                "--no-check-certificate",
+                "--retries", "2",        # fewer retries — we have better fallbacks now
+                "--socket-timeout", "20",
                 "-o", output_template,
             ]
+            # Add TLS impersonation if curl_cffi is available (already in requirements)
+            if HAS_CURL_CFFI:
+                base_cmd += ["--impersonate", "chrome130"]
+            else:
+                base_cmd += [
+                    "--user-agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+                ]
             if cookies_file and Path(cookies_file).exists() and Path(cookies_file).stat().st_size > 50:
                 base_cmd += ["--cookies", cookies_file]
 
-            player_clients = ["mweb", "android", "ios", "web"]
+            # tv_embedded / mediaconnect bypass bot checks better on datacenter IPs.
+            # mweb and ios are kept as additional tries.
+            player_clients = ["tv_embedded", "mediaconnect", "mweb", "ios"]
             for client in player_clients:
                 cmd = base_cmd + ["--extractor-args", f"youtube:player_client={client}", youtube_url]
-                log.info("[job:%s] Running yt-dlp (player_client=%s): %s", job_id, client, " ".join(cmd))
+                log.info("[job:%s] Running yt-dlp (player_client=%s)", job_id, client)
                 try:
                     result = await asyncio.to_thread(run_subprocess_killable, cmd, job_id)
-                    log.info("[job:%s] yt-dlp output: %s", job_id, result.stdout[:200])
-                    
+                    log.info("[job:%s] yt-dlp success with client=%s", job_id, client)
+
                     files = list(PROJECT_ROOT.glob(f"{job_id}.*"))
                     if files:
                         if files[0].suffix.lower() != ".mp3":
@@ -877,12 +974,27 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                         break
                 except subprocess.CalledProcessError as e:
                     stderr = (e.stderr or "")
-                    log.warning("[job:%s] yt-dlp (player_client=%s) failed: %s", job_id, client, stderr[-300:])
+                    log.warning("[job:%s] yt-dlp (player_client=%s) failed: %s", job_id, client, stderr[-200:])
         except Exception as yt_err:
-            log.warning("[job:%s] Direct yt-dlp download failed: %s", job_id, yt_err)
+            log.warning("[job:%s] yt-dlp download failed: %s", job_id, yt_err)
 
-        # 2. Try Cobalt API proxy downloader second if yt-dlp failed
+        # ── 2. Piped API fallback ───────────────────────────────────────────────
+        # Piped fetches from YouTube through its own infrastructure (not our IP),
+        # so this bypasses the datacenter block. Works on both HF and local.
         if not download_success:
+            try:
+                video_id = extract_youtube_video_id(youtube_url)
+                log.info("[job:%s] yt-dlp failed — trying Piped API for video: %s", job_id, video_id)
+                await asyncio.to_thread(download_via_piped_api, video_id, input_path)
+                download_success = True
+            except Exception as piped_err:
+                log.warning("[job:%s] Piped API fallback failed: %s", job_id, piped_err)
+
+        # ── 3. Cobalt + Invidious (local dev only) ─────────────────────────────
+        # On Hugging Face these ALWAYS fail (datacenter IP is blacklisted by
+        # Cobalt instances and Invidious mirrors). Skipping them saves ~3 minutes
+        # of useless timeout churn before showing the error to the user.
+        if not download_success and not IS_HF_SPACE:
             try:
                 log.info("[job:%s] Attempting Cobalt proxy fallback download for URL: %s", job_id, youtube_url)
                 await asyncio.to_thread(download_via_cobalt_proxy, youtube_url, input_path)
@@ -890,8 +1002,7 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
             except Exception as cob_err:
                 log.warning("[job:%s] Cobalt proxy fallback failed: %s. Trying Invidious proxy...", job_id, cob_err)
 
-        # 3. Try Invidious proxy downloader third if Cobalt also failed
-        if not download_success:
+        if not download_success and not IS_HF_SPACE:
             try:
                 video_id = extract_youtube_video_id(youtube_url)
                 log.info("[job:%s] Attempting Invidious proxy fallback download for video: %s", job_id, video_id)
@@ -901,11 +1012,11 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                 log.warning("[job:%s] Invidious proxy fallback failed: %s", job_id, inv_err)
 
         if not download_success or not input_path.exists() or input_path.stat().st_size == 0:
-            raise RuntimeError("All audio download attempts (yt-dlp, Cobalt proxy, Invidious proxy) failed.")
+            raise RuntimeError("All audio download attempts failed. YouTube may be blocking requests from this server's IP.")
 
         log.info("[job:%s] Download complete. File: %s (%.2f MB)", job_id, input_path.name, input_path.stat().st_size / 1024 / 1024)
 
-        # 4. Delegate to process_job for Demucs splitting
+        # ── 4. Demucs stem separation ───────────────────────────────────────────
         await process_job(job_id, input_path)
 
     except Exception as exc:
@@ -919,7 +1030,5 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
             input_path.unlink()
 
 
-
-
 if FRONTEND_DIST.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
