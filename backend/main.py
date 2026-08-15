@@ -834,35 +834,73 @@ def download_via_invidious_proxy(video_id: str, output_path: Path) -> None:
 
 def download_via_piped_api(video_id: str, output_path: Path) -> None:
     """Download YouTube audio via Piped public API instances.
-    
-    Piped fetches from YouTube on its own residential-backed servers, so this works
-    even from datacenter IPs like Hugging Face Spaces where direct yt-dlp fails.
-    Piped returns direct audio stream URLs which we pipe through ffmpeg to get an MP3.
+
+    Piped fetches from YouTube on its own infrastructure so this bypasses
+    HF datacenter IP blocks. We dynamically fetch the live instance list
+    and fall back to a hardcoded list if that fails.
     """
     import urllib.request as _urllib_request
+    import ssl as _ssl
     import json as _json
 
-    piped_instances = [
+    # Try to fetch the live instance list from kavin.rocks
+    live_instances = []
+    try:
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        req = _urllib_request.Request(
+            "https://piped-instances.kavin.rocks/",
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+        )
+        with _urllib_request.urlopen(req, timeout=8, context=ctx) as resp:
+            inst_data = _json.loads(resp.read().decode("utf-8"))
+            for item in inst_data:
+                api_url = item.get("api_url", "").rstrip("/")
+                if api_url:
+                    live_instances.append(api_url)
+        log.info("[Piped] Fetched %d live instances", len(live_instances))
+    except Exception as e:
+        log.warning("[Piped] Failed to fetch live instance list: %s", e)
+
+    # Hardcoded fallback list — kept broad since availability varies by network
+    static_instances = [
         "https://pipedapi.kavin.rocks",
         "https://piped-api.garudalinux.org",
         "https://api.piped.yt",
-        "https://piped-api.lunar.icu",
-        "https://piped.video/api",
         "https://pipedapi.adminforge.de",
         "https://piped-api.privacy.com.de",
+        "https://piped-api.lunar.icu",
+        "https://piped.yt",
+        "https://watchapi.whatever.social",
+        "https://api.piped.rocks",
+        "https://piped-api.codeberg.page",
     ]
 
-    last_error = None
+    # Merge: live instances first (more likely current), then static fallbacks
+    seen = set()
+    instances = []
+    for inst in live_instances + static_instances:
+        if inst not in seen:
+            seen.add(inst)
+            instances.append(inst)
 
-    for instance in piped_instances:
+    last_error = None
+    # Use an SSL context that ignores cert errors — needed for instances
+    # with expired/self-signed certs (e.g. pipedapi.kavin.rocks HTTP 526)
+    ssl_ctx = _ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = _ssl.CERT_NONE
+
+    for instance in instances[:12]:
         url = f"{instance}/streams/{video_id}"
-        log.info("Trying Piped API instance: %s", url)
+        log.info("[Piped] Trying instance: %s", url)
         try:
             req = _urllib_request.Request(
                 url,
                 headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
             )
-            with _urllib_request.urlopen(req, timeout=10) as response:
+            with _urllib_request.urlopen(req, timeout=10, context=ssl_ctx) as response:
                 data = _json.loads(response.read().decode("utf-8"))
 
             # audioStreams is a list of dicts with {url, mimeType, bitrate, ...}
@@ -943,9 +981,11 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
                 "--socket-timeout", "20",
                 "-o", output_template,
             ]
-            # Add TLS impersonation if curl_cffi is available (already in requirements)
+            # Add TLS impersonation if curl_cffi is available.
+            # Use the generic 'chrome' alias — pinned versions (e.g. chrome130)
+            # may not be available in all curl_cffi builds.
             if HAS_CURL_CFFI:
-                base_cmd += ["--impersonate", "chrome130"]
+                base_cmd += ["--impersonate", "chrome"]
             else:
                 base_cmd += [
                     "--user-agent",
