@@ -19,6 +19,7 @@ os.environ["HF_HOME"] = "/app/.cache/hub"
 IS_HF_SPACE = os.path.exists("/app")
 import atexit
 import asyncio
+import glob
 import logging
 import shutil
 import subprocess
@@ -43,6 +44,49 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
+
+# ── bgutil PO Token Provider ───────────────────────────────────────────────────
+# Generates YouTube Proof-Of-Origin tokens via BotGuard JavaScript.
+# This is the key that unlocks YouTube downloads from datacenter IPs like HF.
+# The server runs locally on port 4416 and yt-dlp queries it before each download.
+_BGUTIL_PORT = 4416
+_bgutil_proc: subprocess.Popen | None = None
+
+def _start_bgutil_server() -> None:
+    global _bgutil_proc
+    node_bin = shutil.which("node")
+    if not node_bin:
+        log.warning("[bgutil] node not found in PATH — skipping PO token provider")
+        return
+    # Find installed bgutil index.js (npm global install location)
+    search_paths = [
+        "/usr/local/lib/node_modules/@imputnet/bgutil-ytdlp-pot-provider/dist/index.js",
+        "/usr/lib/node_modules/@imputnet/bgutil-ytdlp-pot-provider/dist/index.js",
+    ]
+    # Also search dynamically
+    search_paths += glob.glob("/usr/**/bgutil-ytdlp-pot-provider/dist/index.js", recursive=True)
+    bgutil_script = next((p for p in search_paths if Path(p).exists()), None)
+    if not bgutil_script:
+        log.warning("[bgutil] Package not found — skipping PO token provider")
+        return
+    try:
+        _bgutil_proc = subprocess.Popen(
+            [node_bin, bgutil_script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(2)  # Allow server to bind port
+        if _bgutil_proc.poll() is None:
+            log.info("[bgutil] PO token provider started on port %d (pid=%s)", _BGUTIL_PORT, _bgutil_proc.pid)
+        else:
+            log.warning("[bgutil] Process exited immediately — check package installation")
+            _bgutil_proc = None
+    except Exception as exc:
+        log.warning("[bgutil] Failed to start: %s", exc)
+        _bgutil_proc = None
+
+if IS_HF_SPACE:
+    _start_bgutil_server()
 
 # ── App setup ──────────────────────────────────────────────────────────────────
 app = FastAPI()
@@ -996,10 +1040,23 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
 
             # tv_embedded / mediaconnect bypass bot checks better on datacenter IPs.
             # mweb and ios are kept as additional tries.
-            player_clients = ["tv_embedded", "mediaconnect", "mweb", "ios"]
+            # If bgutil PO token provider is running, try 'web' client first with it
+            # (bgutil only works well with the 'web' client).
+            bgutil_ok = IS_HF_SPACE and _bgutil_proc is not None and _bgutil_proc.poll() is None
+            if bgutil_ok:
+                player_clients = ["web", "tv_embedded", "mweb", "ios"]
+            else:
+                player_clients = ["tv_embedded", "mediaconnect", "mweb", "ios"]
+
             for client in player_clients:
-                cmd = base_cmd + ["--extractor-args", f"youtube:player_client={client}", youtube_url]
-                log.info("[job:%s] Running yt-dlp (player_client=%s)", job_id, client)
+                if bgutil_ok and client == "web":
+                    # Use bgutil PO token provider for the web client
+                    extractor_args = f"youtube:player_client=web;getpot_bgutil_baseurl=http://localhost:{_BGUTIL_PORT}"
+                    log.info("[job:%s] Running yt-dlp (player_client=web+bgutil)", job_id)
+                else:
+                    extractor_args = f"youtube:player_client={client}"
+                    log.info("[job:%s] Running yt-dlp (player_client=%s)", job_id, client)
+                cmd = base_cmd + ["--extractor-args", extractor_args, youtube_url]
                 try:
                     result = await asyncio.to_thread(run_subprocess_killable, cmd, job_id)
                     log.info("[job:%s] yt-dlp success with client=%s", job_id, client)
