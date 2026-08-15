@@ -19,7 +19,6 @@ os.environ["HF_HOME"] = "/app/.cache/hub"
 IS_HF_SPACE = os.path.exists("/app")
 import atexit
 import asyncio
-import glob
 import logging
 import shutil
 import subprocess
@@ -47,42 +46,42 @@ log = logging.getLogger(__name__)
 
 # ── bgutil PO Token Provider ───────────────────────────────────────────────────
 # Generates YouTube Proof-Of-Origin tokens via BotGuard JavaScript.
-# This is the key that unlocks YouTube downloads from datacenter IPs like HF.
-# The server runs locally on port 4416 and yt-dlp queries it before each download.
+# Bypasses the "Sign in to confirm you're not a bot" error on datacenter IPs.
+# The server runs locally on port 4416 and yt-dlp queries it per download.
+# NOTE: Only active when the npm package is pre-installed in the Docker image.
+#       If not installed, the code falls back gracefully to other player clients.
 _BGUTIL_PORT = 4416
 _bgutil_proc: subprocess.Popen | None = None
 
 def _start_bgutil_server() -> None:
     global _bgutil_proc
-    node_bin = shutil.which("node")
-    if not node_bin:
-        log.warning("[bgutil] node not found in PATH — skipping PO token provider")
-        return
-    # Find installed bgutil index.js (npm global install location)
-    search_paths = [
-        "/usr/local/lib/node_modules/@imputnet/bgutil-ytdlp-pot-provider/dist/index.js",
-        "/usr/lib/node_modules/@imputnet/bgutil-ytdlp-pot-provider/dist/index.js",
-    ]
-    # Also search dynamically
-    search_paths += glob.glob("/usr/**/bgutil-ytdlp-pot-provider/dist/index.js", recursive=True)
-    bgutil_script = next((p for p in search_paths if Path(p).exists()), None)
-    if not bgutil_script:
-        log.warning("[bgutil] Package not found — skipping PO token provider")
-        return
     try:
+        node_bin = shutil.which("node")
+        if not node_bin:
+            log.info("[bgutil] node not found — PO token provider unavailable")
+            return
+        # Check only known npm global install paths (no recursive glob — too slow)
+        candidate_paths = [
+            "/usr/local/lib/node_modules/@imputnet/bgutil-ytdlp-pot-provider/dist/index.js",
+            "/usr/lib/node_modules/@imputnet/bgutil-ytdlp-pot-provider/dist/index.js",
+        ]
+        bgutil_script = next((p for p in candidate_paths if Path(p).exists()), None)
+        if not bgutil_script:
+            log.info("[bgutil] Package not installed — PO token provider unavailable")
+            return
         _bgutil_proc = subprocess.Popen(
             [node_bin, bgutil_script],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        time.sleep(2)  # Allow server to bind port
+        time.sleep(2)  # Allow server to bind port 4416
         if _bgutil_proc.poll() is None:
             log.info("[bgutil] PO token provider started on port %d (pid=%s)", _BGUTIL_PORT, _bgutil_proc.pid)
         else:
-            log.warning("[bgutil] Process exited immediately — check package installation")
+            log.warning("[bgutil] Process exited immediately after start")
             _bgutil_proc = None
     except Exception as exc:
-        log.warning("[bgutil] Failed to start: %s", exc)
+        log.warning("[bgutil] Startup failed (non-fatal): %s", exc)
         _bgutil_proc = None
 
 if IS_HF_SPACE:
