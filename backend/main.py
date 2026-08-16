@@ -123,8 +123,11 @@ def _update_ytdlp() -> None:
         log.warning("[yt-dlp] Auto-update failed (non-fatal): %s", e)
 
 if IS_HF_SPACE:
-    _start_bgutil_server()
-    _update_ytdlp()
+    import threading as _threading
+    # Install bgutil in background so uvicorn starts immediately.
+    # yt-dlp update also runs in background — neither blocks server startup.
+    _threading.Thread(target=_install_and_start_bgutil, daemon=True, name="bgutil-setup").start()
+    _threading.Thread(target=_update_ytdlp, daemon=True, name="ytdlp-update").start()
 
 # ── App setup ──────────────────────────────────────────────────────────────────
 app = FastAPI()
