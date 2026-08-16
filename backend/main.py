@@ -47,53 +47,26 @@ log = logging.getLogger(__name__)
 # ── bgutil PO Token Provider ───────────────────────────────────────────────────
 # Generates YouTube Proof-Of-Origin tokens via BotGuard JavaScript.
 # Bypasses "Sign in to confirm you're not a bot" on HF datacenter IPs.
-# Installed lazily in a background thread at startup so Docker build stays fast
-# and uvicorn starts immediately. By the time a user tries YouTube, it's ready.
+# The server is compiled from source in the Dockerfile at /app/bgutil-server.
 _BGUTIL_PORT = 4416
 _bgutil_proc: subprocess.Popen | None = None
+_BGUTIL_SCRIPT = Path("/app/bgutil-server/server/build/main.js")
 
-# Cache dir writable at runtime on HF (/app/.cache is chmod 777 by Dockerfile)
-_BGUTIL_CACHE_DIR = Path("/app/.cache/bgutil")
-_BGUTIL_SCRIPT = _BGUTIL_CACHE_DIR / "node_modules/@imputnet/bgutil-ytdlp-pot-provider/dist/index.js"
-
-def _install_and_start_bgutil() -> None:
-    """Install bgutil via npm (once, cached) then start the HTTP server."""
+def _start_bgutil_server() -> None:
+    """Start the bgutil PO token provider HTTP server on port 4416."""
     global _bgutil_proc
-    import threading
     try:
         node_bin = shutil.which("node")
-        npm_bin = shutil.which("npm")
-        if not node_bin or not npm_bin:
-            log.info("[bgutil] node/npm not found — PO token provider unavailable")
+        if not node_bin or not _BGUTIL_SCRIPT.exists():
+            log.info("[bgutil] Server script not found at %s (local dev or not built)", _BGUTIL_SCRIPT)
             return
 
-        # Install if not already cached
-        if not _BGUTIL_SCRIPT.exists():
-            log.info("[bgutil] Installing @imputnet/bgutil-ytdlp-pot-provider via npm...")
-            _BGUTIL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            result = subprocess.run(
-                [npm_bin, "install", "@imputnet/bgutil-ytdlp-pot-provider"],
-                cwd=str(_BGUTIL_CACHE_DIR),
-                capture_output=True,
-                text=True,
-                timeout=300,  # 5-min timeout for npm install
-            )
-            if result.returncode != 0:
-                log.warning("[bgutil] npm install failed: %s", (result.stdout + result.stderr)[-300:])
-                return
-            log.info("[bgutil] npm install complete")
-
-        if not _BGUTIL_SCRIPT.exists():
-            log.warning("[bgutil] Script not found after install: %s", _BGUTIL_SCRIPT)
-            return
-
-        # Start the HTTP server on port 4416
         _bgutil_proc = subprocess.Popen(
             [node_bin, str(_BGUTIL_SCRIPT)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        time.sleep(3)  # Give the server time to bind port 4416
+        time.sleep(2)  # Give the server time to bind port 4416
         if _bgutil_proc.poll() is None:
             log.info("[bgutil] PO token provider ready on port %d (pid=%s)", _BGUTIL_PORT, _bgutil_proc.pid)
         else:
@@ -104,29 +77,23 @@ def _install_and_start_bgutil() -> None:
         _bgutil_proc = None
 
 # ── yt-dlp Auto-Updater ───────────────────────────────────────────────────────
-# YouTube frequently changes its bot-detection. yt-dlp releases nightly builds
-# that contain the latest workarounds. On Hugging Face, update at startup so the
-# container always runs the freshest version without a full Docker rebuild.
 def _update_ytdlp() -> None:
     try:
-        log.info("[yt-dlp] Updating to nightly for latest YouTube fixes...")
+        log.info("[yt-dlp] Checking for latest updates via pip...")
         result = subprocess.run(
-            ["yt-dlp", "--update-to", "nightly"],
+            [sys.executable, "-m", "pip", "install", "-U", "--no-cache-dir", "yt-dlp[default,curl-cffi]", "bgutil-ytdlp-pot-provider"],
             capture_output=True, text=True, timeout=60
         )
         if result.returncode == 0:
-            log.info("[yt-dlp] Update complete: %s", result.stdout.strip()[:200])
+            log.info("[yt-dlp] Update check complete")
         else:
-            # Non-fatal — already-current installs return non-zero on some versions
-            log.info("[yt-dlp] Update output (non-fatal): %s", (result.stdout + result.stderr).strip()[:200])
+            log.info("[yt-dlp] Update output: %s", (result.stdout + result.stderr).strip()[:200])
     except Exception as e:
         log.warning("[yt-dlp] Auto-update failed (non-fatal): %s", e)
 
 if IS_HF_SPACE:
+    _start_bgutil_server()
     import threading as _threading
-    # Install bgutil in background so uvicorn starts immediately.
-    # yt-dlp update also runs in background — neither blocks server startup.
-    _threading.Thread(target=_install_and_start_bgutil, daemon=True, name="bgutil-setup").start()
     _threading.Thread(target=_update_ytdlp, daemon=True, name="ytdlp-update").start()
 
 # ── App setup ──────────────────────────────────────────────────────────────────
@@ -1115,7 +1082,7 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
             for client in player_clients:
                 if bgutil_ok and client == "web":
                     # Use bgutil PO token provider for the web client
-                    extractor_args = f"youtube:player_client=web;getpot_bgutil_baseurl=http://localhost:{_BGUTIL_PORT}"
+                    extractor_args = f"youtube:player_client=web;youtubepot-bgutilhttp:base_url=http://127.0.0.1:{_BGUTIL_PORT};getpot_bgutil_baseurl=http://127.0.0.1:{_BGUTIL_PORT}"
                     log.info("[job:%s] Running yt-dlp (player_client=web+bgutil)", job_id)
                 else:
                     extractor_args = f"youtube:player_client={client}"

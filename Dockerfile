@@ -21,14 +21,20 @@ ENV VECLIB_MAXIMUM_THREADS=2
 ENV TORCH_HOME=/app/.cache/torch
 ENV HF_HOME=/app/.cache/hub
 
-# Install ffmpeg, libsndfile, nodejs + npm (nodejs/npm needed for bgutil PO token provider,
-# installed lazily at runtime — not here — to keep Docker build fast)
+# Install ffmpeg, libsndfile, nodejs, npm, and git
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
     nodejs \
     npm \
+    git \
     && rm -rf /var/lib/apt/lists/*
+
+# Clone and build bgutil PO Token provider server (runs locally on port 4416 at runtime)
+RUN git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /app/bgutil-server && \
+    cd /app/bgutil-server/server && \
+    npm ci && \
+    npx tsc
 
 COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --no-cache-dir -r /app/backend/requirements.txt
