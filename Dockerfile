@@ -21,11 +21,13 @@ ENV VECLIB_MAXIMUM_THREADS=2
 ENV TORCH_HOME=/app/.cache/torch
 ENV HF_HOME=/app/.cache/hub
 
-# Install ffmpeg, libsndfile, and nodejs (required by yt-dlp for JS challenge solving)
+# Install ffmpeg, libsndfile, nodejs + npm (nodejs/npm needed for bgutil PO token provider,
+# installed lazily at runtime — not here — to keep Docker build fast)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
     nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt /app/backend/requirements.txt

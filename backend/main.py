@@ -46,46 +46,85 @@ log = logging.getLogger(__name__)
 
 # ── bgutil PO Token Provider ───────────────────────────────────────────────────
 # Generates YouTube Proof-Of-Origin tokens via BotGuard JavaScript.
-# Bypasses the "Sign in to confirm you're not a bot" error on datacenter IPs.
-# The server runs locally on port 4416 and yt-dlp queries it per download.
-# NOTE: Only active when the npm package is pre-installed in the Docker image.
-#       If not installed, the code falls back gracefully to other player clients.
+# Bypasses "Sign in to confirm you're not a bot" on HF datacenter IPs.
+# Installed lazily in a background thread at startup so Docker build stays fast
+# and uvicorn starts immediately. By the time a user tries YouTube, it's ready.
 _BGUTIL_PORT = 4416
 _bgutil_proc: subprocess.Popen | None = None
 
-def _start_bgutil_server() -> None:
+# Cache dir writable at runtime on HF (/app/.cache is chmod 777 by Dockerfile)
+_BGUTIL_CACHE_DIR = Path("/app/.cache/bgutil")
+_BGUTIL_SCRIPT = _BGUTIL_CACHE_DIR / "node_modules/@imputnet/bgutil-ytdlp-pot-provider/dist/index.js"
+
+def _install_and_start_bgutil() -> None:
+    """Install bgutil via npm (once, cached) then start the HTTP server."""
     global _bgutil_proc
+    import threading
     try:
         node_bin = shutil.which("node")
-        if not node_bin:
-            log.info("[bgutil] node not found — PO token provider unavailable")
+        npm_bin = shutil.which("npm")
+        if not node_bin or not npm_bin:
+            log.info("[bgutil] node/npm not found — PO token provider unavailable")
             return
-        # Check only known npm global install paths (no recursive glob — too slow)
-        candidate_paths = [
-            "/usr/local/lib/node_modules/@imputnet/bgutil-ytdlp-pot-provider/dist/index.js",
-            "/usr/lib/node_modules/@imputnet/bgutil-ytdlp-pot-provider/dist/index.js",
-        ]
-        bgutil_script = next((p for p in candidate_paths if Path(p).exists()), None)
-        if not bgutil_script:
-            log.info("[bgutil] Package not installed — PO token provider unavailable")
+
+        # Install if not already cached
+        if not _BGUTIL_SCRIPT.exists():
+            log.info("[bgutil] Installing @imputnet/bgutil-ytdlp-pot-provider via npm...")
+            _BGUTIL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            result = subprocess.run(
+                [npm_bin, "install", "@imputnet/bgutil-ytdlp-pot-provider"],
+                cwd=str(_BGUTIL_CACHE_DIR),
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5-min timeout for npm install
+            )
+            if result.returncode != 0:
+                log.warning("[bgutil] npm install failed: %s", (result.stdout + result.stderr)[-300:])
+                return
+            log.info("[bgutil] npm install complete")
+
+        if not _BGUTIL_SCRIPT.exists():
+            log.warning("[bgutil] Script not found after install: %s", _BGUTIL_SCRIPT)
             return
+
+        # Start the HTTP server on port 4416
         _bgutil_proc = subprocess.Popen(
-            [node_bin, bgutil_script],
+            [node_bin, str(_BGUTIL_SCRIPT)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        time.sleep(2)  # Allow server to bind port 4416
+        time.sleep(3)  # Give the server time to bind port 4416
         if _bgutil_proc.poll() is None:
-            log.info("[bgutil] PO token provider started on port %d (pid=%s)", _BGUTIL_PORT, _bgutil_proc.pid)
+            log.info("[bgutil] PO token provider ready on port %d (pid=%s)", _BGUTIL_PORT, _bgutil_proc.pid)
         else:
-            log.warning("[bgutil] Process exited immediately after start")
+            log.warning("[bgutil] Server exited immediately after start")
             _bgutil_proc = None
     except Exception as exc:
-        log.warning("[bgutil] Startup failed (non-fatal): %s", exc)
+        log.warning("[bgutil] Setup failed (non-fatal): %s", exc)
         _bgutil_proc = None
+
+# ── yt-dlp Auto-Updater ───────────────────────────────────────────────────────
+# YouTube frequently changes its bot-detection. yt-dlp releases nightly builds
+# that contain the latest workarounds. On Hugging Face, update at startup so the
+# container always runs the freshest version without a full Docker rebuild.
+def _update_ytdlp() -> None:
+    try:
+        log.info("[yt-dlp] Updating to nightly for latest YouTube fixes...")
+        result = subprocess.run(
+            ["yt-dlp", "--update-to", "nightly"],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode == 0:
+            log.info("[yt-dlp] Update complete: %s", result.stdout.strip()[:200])
+        else:
+            # Non-fatal — already-current installs return non-zero on some versions
+            log.info("[yt-dlp] Update output (non-fatal): %s", (result.stdout + result.stderr).strip()[:200])
+    except Exception as e:
+        log.warning("[yt-dlp] Auto-update failed (non-fatal): %s", e)
 
 if IS_HF_SPACE:
     _start_bgutil_server()
+    _update_ytdlp()
 
 # ── App setup ──────────────────────────────────────────────────────────────────
 app = FastAPI()
@@ -886,25 +925,39 @@ def download_via_piped_api(video_id: str, output_path: Path) -> None:
     import ssl as _ssl
     import json as _json
 
-    # Try to fetch the live instance list from kavin.rocks
+    # Try to fetch the live instance list — try two sources for resilience
     live_instances = []
-    try:
-        ctx = _ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = _ssl.CERT_NONE
-        req = _urllib_request.Request(
-            "https://piped-instances.kavin.rocks/",
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-        )
-        with _urllib_request.urlopen(req, timeout=8, context=ctx) as resp:
-            inst_data = _json.loads(resp.read().decode("utf-8"))
-            for item in inst_data:
-                api_url = item.get("api_url", "").rstrip("/")
-                if api_url:
-                    live_instances.append(api_url)
-        log.info("[Piped] Fetched %d live instances", len(live_instances))
-    except Exception as e:
-        log.warning("[Piped] Failed to fetch live instance list: %s", e)
+
+    # Source 1: kavin.rocks (often stale / returns broken instances)
+    sources = [
+        "https://piped-instances.kavin.rocks/",
+        # Source 2: raw GitHub list maintained by the Piped project
+        "https://raw.githubusercontent.com/TeamPiped/documentation/main/docs/public-instances/index.json",
+    ]
+    ctx = _ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = _ssl.CERT_NONE
+
+    for source_url in sources:
+        if len(live_instances) >= 3:
+            break
+        try:
+            req = _urllib_request.Request(
+                source_url,
+                headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+            )
+            with _urllib_request.urlopen(req, timeout=8, context=ctx) as resp:
+                inst_data = _json.loads(resp.read().decode("utf-8"))
+                # kavin.rocks returns [{api_url: ...}, ...]
+                # GitHub list returns [{locations: [...], apiurl: ..., name: ...}, ...]
+                if isinstance(inst_data, list):
+                    for item in inst_data:
+                        api_url = (item.get("api_url") or item.get("apiurl") or "").rstrip("/")
+                        if api_url and api_url not in live_instances:
+                            live_instances.append(api_url)
+            log.info("[Piped] Fetched %d live instances from %s", len(live_instances), source_url)
+        except Exception as e:
+            log.warning("[Piped] Failed to fetch instance list from %s: %s", source_url, e)
 
     # Hardcoded fallback list — kept broad since availability varies by network
     static_instances = [
@@ -1042,7 +1095,16 @@ async def process_youtube_job(job_id: str, youtube_url: str, video_title: str) -
             # If bgutil PO token provider is running, try 'web' client first with it
             # (bgutil only works well with the 'web' client).
             bgutil_ok = IS_HF_SPACE and _bgutil_proc is not None and _bgutil_proc.poll() is None
+            cookies_file_ok = bool(
+                os.getenv("YOUTUBE_COOKIES_FILE", "").strip()
+                and Path(os.getenv("YOUTUBE_COOKIES_FILE", "").strip()).exists()
+                and Path(os.getenv("YOUTUBE_COOKIES_FILE", "").strip()).stat().st_size > 50
+            )
             if bgutil_ok:
+                # bgutil provides PO tokens for the web client — best bypass for datacenter IPs
+                player_clients = ["web", "tv_embedded", "mweb", "ios"]
+            elif cookies_file_ok:
+                # Cookies alone can sometimes unblock the web client
                 player_clients = ["web", "tv_embedded", "mweb", "ios"]
             else:
                 player_clients = ["tv_embedded", "mediaconnect", "mweb", "ios"]
